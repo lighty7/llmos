@@ -43,6 +43,7 @@ mod power;
 mod selftest;
 mod serial;
 mod shell;
+mod storage;
 mod time;
 
 /// Bootloader configuration embedded in the kernel binary.
@@ -95,6 +96,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mem = memory::stats(&boot_info.memory_regions);
     let heap_size = allocator::heap_size_for(mem.usable_bytes);
     allocator::init(heap_size, &mut mapper, &mut frames).expect("heap initialisation failed");
+    memory::install_frame_allocator(frames);
     log_ok!(
         "memory: {} MiB usable, {} MiB heap at {:#x}",
         mem.usable_bytes / MIB,
@@ -110,7 +112,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
 
     // 5. Hardware inventory.
-    let inventory = inventory::Inventory::collect(boot_info, mem, heap_size, display);
+    let mut inventory = inventory::Inventory::collect(boot_info, mem, heap_size, display);
+    log_ok!("storage: {}", storage::init(&inventory.pci_devices));
+    inventory.disks = storage::disk_info();
     log_ok!(
         "inventory: {} PCI device(s), {} CPU(s)",
         inventory.pci_devices.len(),

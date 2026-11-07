@@ -41,18 +41,53 @@ pub struct PciDevice {
     pub vendor: String,
 }
 
-/// Reads a 32-bit register from a function's configuration space.
-fn read_config(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    let address = 0x8000_0000
+/// Configuration-space address of a register.
+fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    0x8000_0000
         | (bus as u32) << 16
         | (device as u32) << 11
         | (function as u32) << 8
-        | (offset as u32 & 0xFC);
+        | (offset as u32 & 0xFC)
+}
+
+/// Reads a 32-bit register from a function's configuration space.
+pub fn read_config(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     // SAFETY: 0xCF8/0xCFC are the standard PCI configuration ports; reading
     // configuration space has no side effects.
     unsafe {
-        Port::<u32>::new(CONFIG_ADDRESS).write(address);
+        Port::<u32>::new(CONFIG_ADDRESS).write(config_address(bus, device, function, offset));
         Port::<u32>::new(CONFIG_DATA).read()
+    }
+}
+
+/// Writes a 32-bit register in a function's configuration space.
+///
+/// # Safety
+///
+/// Changing configuration registers can remap device memory or enable DMA;
+/// the caller must know what the register does for this device.
+pub unsafe fn write_config(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    // SAFETY: the ports are the standard configuration mechanism; the effect
+    // of the write is the caller's responsibility.
+    unsafe {
+        Port::<u32>::new(CONFIG_ADDRESS).write(config_address(bus, device, function, offset));
+        Port::<u32>::new(CONFIG_DATA).write(value);
+    }
+}
+
+impl PciDevice {
+    /// Reads base address register `index` (0..=5).
+    pub fn bar(&self, index: u8) -> u32 {
+        read_config(self.bus, self.device, self.function, 0x10 + index * 4)
+    }
+
+    /// Enables I/O-space decoding, memory-space decoding and bus mastering
+    /// (DMA) in the command register.
+    pub fn enable_io_and_dma(&self) {
+        let cmd = read_config(self.bus, self.device, self.function, 0x04);
+        // SAFETY: setting bits 0 (I/O), 1 (memory) and 2 (bus master) only
+        // lets a device we are about to drive respond and perform DMA.
+        unsafe { write_config(self.bus, self.device, self.function, 0x04, cmd | 0b111) };
     }
 }
 

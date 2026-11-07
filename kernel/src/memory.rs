@@ -9,6 +9,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
+use spin::Mutex;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
@@ -120,4 +121,70 @@ pub fn stats(regions: &MemoryRegions) -> MemoryStats {
         }
     }
     s
+}
+
+/// The kernel's frame allocator after boot (used for DMA buffers).
+static FRAMES: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
+
+/// Hands the boot-time frame allocator over to the kernel for later use.
+pub fn install_frame_allocator(frames: BootInfoFrameAllocator) {
+    *FRAMES.lock() = Some(frames);
+}
+
+/// A physically contiguous, zeroed buffer for device DMA.
+pub struct DmaBuffer {
+    /// Physical address of the first byte (what devices are given).
+    pub phys: u64,
+    /// Kernel virtual address of the first byte.
+    pub virt: *mut u8,
+    /// Length in bytes.
+    pub len: usize,
+}
+
+// SAFETY: the buffer is plain memory owned by one driver at a time.
+unsafe impl Send for DmaBuffer {}
+
+impl DmaBuffer {
+    /// Allocates `pages` physically contiguous, zeroed 4 KiB pages.
+    ///
+    /// Frames are never freed, so drivers should allocate once at start-up.
+    /// Returns `None` if no contiguous run is available.
+    pub fn new(pages: usize) -> Option<Self> {
+        let mut guard = FRAMES.lock();
+        let frames = guard.as_mut()?;
+        // The allocator hands out frames in address order, so runs are
+        // usually contiguous; restart the run whenever there is a gap.
+        let mut start = frames.allocate_frame()?.start_address().as_u64();
+        let mut count = 1;
+        while count < pages {
+            let next = frames.allocate_frame()?.start_address().as_u64();
+            if next == start + count as u64 * PAGE_SIZE {
+                count += 1;
+            } else {
+                start = next;
+                count = 1;
+            }
+        }
+        let len = pages * PAGE_SIZE as usize;
+        let virt = phys_to_virt(start) as *mut u8;
+        // SAFETY: the frames were just allocated, so this memory is unused.
+        unsafe { core::ptr::write_bytes(virt, 0, len) };
+        Some(Self {
+            phys: start,
+            virt,
+            len,
+        })
+    }
+
+    /// The buffer as a byte slice.
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: `virt..virt+len` is mapped memory owned by this buffer.
+        unsafe { core::slice::from_raw_parts(self.virt, self.len) }
+    }
+
+    /// The buffer as a mutable byte slice.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as above, and `&mut self` guarantees exclusive access.
+        unsafe { core::slice::from_raw_parts_mut(self.virt, self.len) }
+    }
 }

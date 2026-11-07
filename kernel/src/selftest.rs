@@ -26,6 +26,7 @@ pub fn run(ctx: &Context) {
         ("PCI enumeration", pci),
         ("file system", file_system),
         ("action validation", action_validation),
+        ("GPT checksum", gpt_crc),
         ("LLM model", model),
     ];
     let mut failed = 0;
@@ -130,6 +131,13 @@ fn file_system(_: &Context) -> Result<(), &'static str> {
     )?;
     fs::remove("selftest.tmp").map_err(|_| "remove failed")?;
     ensure(fs::write("bad/name", b"").is_err(), "invalid name accepted")
+}
+
+fn gpt_crc(_: &Context) -> Result<(), &'static str> {
+    ensure(
+        crate::storage::gpt::crc32_self_test(),
+        "CRC-32 test vector mismatch",
+    )
 }
 
 fn action_validation(_: &Context) -> Result<(), &'static str> {

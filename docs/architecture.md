@@ -52,7 +52,12 @@ The image is built on the host by the runner (`src/main.rs`) with
 | `memory` | `OffsetPageTable`, `phys_to_virt`, frame allocator over `Usable` regions. |
 | `allocator` | Maps the heap range and installs `linked_list_allocator` as the global allocator. |
 | `inventory` | `CpuInfo` (CPUID), `acpi` (RSDP→XSDT→MADT), `pci` (configuration ports 0xCF8/0xCFC). |
-| `fs` | Flat in-memory file system (`BTreeMap<String, Vec<u8>>`). |
+| `fs` | Flat in-memory file system (`BTreeMap<String, Vec<u8>>`), persisted by `storage`. |
+| `storage` | `BlockDevice` trait and disk registry, mounting the data partition, `sync` after changes. |
+| `storage::virtio_blk` | Legacy virtio-blk over PCI I/O ports: one split virtqueue, DMA bounce buffer, polled completion. |
+| `storage::gpt` | GPT parsing and writing (protective MBR, primary and backup headers, CRC-32). |
+| `storage::llmfs` | Data-partition format: one checksummed snapshot of all files. |
+| `storage::install` | Plans and performs the installation onto an empty disk. |
 | `actions` | The `Action` enum: JSON parsing, validation, confirmation policy, execution. |
 | `agent` | Owns the model and inference state. Builds prompts, caches the prefix, decodes actions. |
 | `shell` | Line editor (keyboard + serial) and command dispatch. |
@@ -64,6 +69,26 @@ The image is built on the host by the runner (`src/main.rs`) with
   interrupted.
 * Console output disables interrupts while it holds the serial and screen locks.
 * Nothing allocates in interrupt context.
+
+## Storage and installation
+
+```text
+boot media (vd0)                         empty disk (vd1)
+[GPT][ESP: bootx64.efi, kernel, ramdisk]  ──install──►  [GPT][ESP copy][llmos data (llmfs)][GPT]
+```
+
+* **Drivers:** virtio-blk (QEMU, KVM and cloud VMs). DMA memory comes from
+  `memory::DmaBuffer`: physically contiguous frames, accessed through the physical-memory
+  window. Completion is polled, so no interrupt routing is needed.
+* **Install safety:** only disks *without* a partition table can be targets. The plan is
+  shown first, and both the `install` command and the LLM action require confirmation. The
+  partition table is written *after* the copy, so an interrupted install leaves a disk that
+  still counts as empty.
+* **Persistence:** at boot the first llmos data partition is mounted, and its files are
+  loaded into the RAM file system. Every write or delete rewrites the snapshot.
+* **Booting the installed disk:** the copied ESP contains the same UEFI bootloader, which loads
+  the kernel and model from the partition it was started from, so no boot entry is needed
+  (removable-media path `\EFI\BOOT\BOOTX64.EFI`).
 
 ## The inference engine (`llm`)
 
@@ -127,7 +152,8 @@ most of it by scoring only the allowed tokens.
 ## Known limitations
 
 * Single core; no SMP or scheduler yet.
-* Files live in RAM and are lost at power-off (Phase 6 adds a disk).
+* Storage drivers exist only for virtio-blk. Real PCs need AHCI (SATA) and NVMe drivers.
+* llmfs rewrites all files on every change, which suits small text files only.
 * Power-off uses QEMU/Bochs ports. Real ACPI S5 needs an AML interpreter.
 * The 135M model maps about 70% of unseen paraphrased requests to the right action
   (`agent_eval`). Built-in commands remain available and exact.

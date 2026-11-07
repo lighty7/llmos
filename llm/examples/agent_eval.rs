@@ -41,9 +41,11 @@ const CASES: &[(&str, &str)] = &[
     ("tell me a joke", "say"),
     ("turn off the computer", "poweroff"),
     ("restart the machine", "reboot"),
+    ("what storage devices are there", "list_disks"),
+    ("set up llmos on the second disk", "install"),
 ];
 
-const MACHINE: &str = "CPU: QEMU Virtual CPU with 1 core(s). RAM: 1900 MiB. Devices: host bridge, ISA bridge, SATA controller (AHCI), VGA-compatible display controller, Ethernet controller.";
+const MACHINE: &str = "CPU: QEMU Virtual CPU with 1 core(s). RAM: 1900 MiB. Devices: host bridge, ISA bridge, SATA controller (AHCI), VGA-compatible display controller, Ethernet controller. Disks: vd0 176 MiB (llmos boot media), vd1 512 MiB (empty).";
 
 fn main() {
     let path = std::env::args()

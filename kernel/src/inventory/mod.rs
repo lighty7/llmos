@@ -39,6 +39,8 @@ pub struct Inventory {
     pub display: Option<DisplayInfo>,
     /// Size of the boot RAM disk (holds the LLM model), in bytes.
     pub ramdisk_bytes: u64,
+    /// Disks found by the storage drivers (filled in after `storage::init`).
+    pub disks: Vec<crate::storage::DiskInfo>,
 }
 
 /// Processor details.
@@ -169,6 +171,7 @@ impl Inventory {
                 format: format!("{:?}", d.pixel_format),
             }),
             ramdisk_bytes: boot_info.ramdisk_len,
+            disks: Vec::new(),
         }
     }
 
@@ -218,6 +221,15 @@ impl Inventory {
                 d.bus, d.device, d.function, d.vendor_id, d.device_id, d.kind, d.vendor
             );
         }
+        for d in &self.disks {
+            println!(
+                "  disk:    {} {} MiB, {} [{}]",
+                d.name,
+                d.size_mib,
+                d.role,
+                d.partitions.join(", ")
+            );
+        }
         if let Some(d) = &self.display {
             println!("  display: {}x{} {}", d.width, d.height, d.format);
         }
@@ -228,8 +240,18 @@ impl Inventory {
         let mut kinds: Vec<&str> = self.pci_devices.iter().map(|d| d.kind.as_str()).collect();
         kinds.sort_unstable();
         kinds.dedup();
+        let disks: Vec<String> = self
+            .disks
+            .iter()
+            .map(|d| format!("{} {} MiB ({})", d.name, d.size_mib, d.role))
+            .collect();
+        let disks = if disks.is_empty() {
+            String::from("none")
+        } else {
+            disks.join(", ")
+        };
         format!(
-            "CPU: {} with {} core(s). RAM: {} MiB. Devices: {}.",
+            "CPU: {} with {} core(s). RAM: {} MiB. Devices: {}. Disks: {}.",
             if self.cpu.brand.is_empty() {
                 &self.cpu.vendor
             } else {
@@ -237,7 +259,8 @@ impl Inventory {
             },
             self.processors(),
             self.memory.usable_mib,
-            kinds.join(", ")
+            kinds.join(", "),
+            disks
         )
     }
 }

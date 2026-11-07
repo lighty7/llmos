@@ -82,6 +82,14 @@ pub static SHELL_ACTIONS: &[ActionSpec] = &[
         name: "reboot",
         fields: &[],
     },
+    ActionSpec {
+        name: "list_disks",
+        fields: &[],
+    },
+    ActionSpec {
+        name: "install",
+        fields: &[],
+    },
 ];
 
 /// Instructions, constant across machines (so their key/value cache can be
@@ -99,7 +107,9 @@ clear_screen: clear the screen
 help: list the commands
 say(text): reply in words to a question or greeting
 poweroff: turn the computer off
-reboot: restart the computer";
+reboot: restart the computer
+list_disks: show the disks and partitions
+install: install llmos onto the empty disk";
 
 /// Worked examples, given to the model as earlier conversation turns
 /// (small instruct models imitate turns far better than inline examples).

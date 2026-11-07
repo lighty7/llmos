@@ -6,9 +6,14 @@
 //! ```text
 //! cargo run                       # build + boot in a QEMU window (serial on this terminal)
 //! cargo run -- run --headless     # no window: interact over the terminal only
+//! cargo run -- run --installed    # boot the disk llmos was installed onto
 //! cargo run -- image              # only build target/llmos-uefi.img
-//! cargo run -- test               # automated end-to-end boot test (CI)
+//! cargo run -- test               # automated end-to-end test (CI)
 //! ```
+//!
+//! The boot image is attached as a virtio disk (`vd0`). Unless `--no-disk` is
+//! given, a second, initially empty virtio disk (`vd1`, `target/disk.img`)
+//! is attached as an installation target; delete the file to start afresh.
 //!
 //! Options (for `run`, `image` and `test`):
 //!
@@ -18,12 +23,14 @@
 //! * `--no-model`: boot without a model even if the default file exists.
 //! * `--headless`: do not open a QEMU window.
 //! * `--memory <MiB>`: guest RAM size (default 2048).
+//! * `--no-disk`: do not attach the installation target disk.
+//! * `--installed`: boot only from the installation target disk.
 //!
 //! Environment variables:
 //!
 //! * `OVMF_CODE` / `OVMF_VARS`: paths to the UEFI firmware images. By default
 //!   common distribution locations are searched.
-//! * `LLMOS_TEST_TIMEOUT`: seconds before `test` gives up (default 600).
+//! * `LLMOS_TEST_TIMEOUT`: seconds each test stage may take (default 600).
 
 use std::error::Error;
 use std::io::{BufRead, BufReader, Write};
@@ -37,6 +44,9 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// Default model location, relative to the repository root.
 const DEFAULT_MODEL: &str = "models/llmos.model";
+
+/// Size of a freshly created installation target disk.
+const TARGET_DISK_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Exit code the kernel requests through QEMU's `isa-debug-exit` device on
 /// success. QEMU reports `(value << 1) | 1`, so the kernel writes `0x10`.
@@ -61,59 +71,65 @@ struct Options {
     model: Option<PathBuf>,
     headless: bool,
     memory_mib: u32,
+    target_disk: bool,
+    installed: bool,
 }
 
 impl Options {
     /// Parses `std::env::args()`.
     fn parse() -> Result<Self> {
-        let mut action = Action::Run;
-        let mut release = false;
-        let mut model = None;
+        let mut opts = Options {
+            action: Action::Run,
+            release: false,
+            model: None,
+            headless: false,
+            memory_mib: 2048,
+            target_disk: true,
+            installed: false,
+        };
         let mut no_model = false;
-        let mut headless = false;
-        let mut memory_mib = 2048;
-
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "run" => action = Action::Run,
-                "image" => action = Action::Image,
-                "test" => action = Action::Test,
-                "--release" => release = true,
-                "--headless" => headless = true,
+                "run" => opts.action = Action::Run,
+                "image" => opts.action = Action::Image,
+                "test" => opts.action = Action::Test,
+                "--release" => opts.release = true,
+                "--headless" => opts.headless = true,
                 "--no-model" => no_model = true,
+                "--no-disk" => opts.target_disk = false,
+                "--installed" => opts.installed = true,
                 "--model" => {
-                    model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?))
+                    opts.model = Some(PathBuf::from(args.next().ok_or("--model needs a path")?))
                 }
-                "--memory" => memory_mib = args.next().ok_or("--memory needs a value")?.parse()?,
+                "--memory" => {
+                    opts.memory_mib = args.next().ok_or("--memory needs a value")?.parse()?
+                }
                 "-h" | "--help" => {
                     println!(
-                        "usage: cargo run -- [run|image|test] [--release] [--headless] [--model PATH] [--no-model] [--memory MIB]"
+                        "usage: cargo run -- [run|image|test] [--release] [--headless] \
+                         [--model PATH] [--no-model] [--memory MIB] [--no-disk] [--installed]"
                     );
                     std::process::exit(0);
                 }
                 other => return Err(format!("unknown argument `{other}` (try --help)").into()),
             }
         }
-
-        if model.is_none() && !no_model && Path::new(DEFAULT_MODEL).exists() {
-            model = Some(PathBuf::from(DEFAULT_MODEL));
+        if opts.model.is_none() && !no_model && Path::new(DEFAULT_MODEL).exists() {
+            opts.model = Some(PathBuf::from(DEFAULT_MODEL));
         }
         if no_model {
-            model = None;
+            opts.model = None;
         }
-        if action == Action::Test {
-            headless = true;
+        if opts.action == Action::Test {
+            opts.headless = true;
         }
-        Ok(Self {
-            action,
-            release,
-            model,
-            headless,
-            memory_mib,
-        })
+        Ok(opts)
     }
 }
+
+/// Disks to attach to the virtual machine, in order (`vd0`, `vd1`, ...).
+struct Disks(Vec<PathBuf>);
 
 fn main() -> ExitCode {
     match real_main() {
@@ -129,26 +145,61 @@ fn real_main() -> Result<ExitCode> {
     let opts = Options::parse()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     env::set_current_dir(&root)?;
+    let target_dir = root.join("target");
+    let target_disk = target_dir.join("disk.img");
+
+    if opts.action == Action::Run && opts.installed {
+        if !target_disk.exists() {
+            return Err(
+                "target/disk.img does not exist; boot normally and run `install` first".into(),
+            );
+        }
+        return run_interactive(&root, &Disks(vec![target_disk]), &opts);
+    }
 
     let kernel = build_kernel(&root, opts.release)?;
-    let image = root.join("target").join("llmos-uefi.img");
+    let image = target_dir.join("llmos-uefi.img");
     build_image(&kernel, opts.model.as_deref(), &image)?;
     println!("disk image: {}", image.display());
 
     match opts.action {
         Action::Image => Ok(ExitCode::SUCCESS),
         Action::Run => {
-            let status = qemu_command(&root, &image, &opts)?.status()?;
-            Ok(
-                if status.success() || status.code() == Some(QEMU_EXIT_SUCCESS) {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::from(status.code().unwrap_or(1) as u8)
-                },
-            )
+            let mut disks = vec![image];
+            if opts.target_disk {
+                if !target_disk.exists() {
+                    create_empty_disk(&target_disk)?;
+                }
+                disks.push(target_disk);
+            }
+            run_interactive(&root, &Disks(disks), &opts)
         }
-        Action::Test => run_boot_test(&root, &image, &opts),
+        Action::Test => run_tests(&root, &image, &opts),
     }
+}
+
+/// Boots the machine with the terminal attached to the serial console.
+fn run_interactive(root: &Path, disks: &Disks, opts: &Options) -> Result<ExitCode> {
+    let status = qemu_command(root, disks, opts)?.status()?;
+    Ok(
+        if status.success() || status.code() == Some(QEMU_EXIT_SUCCESS) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(status.code().unwrap_or(1) as u8)
+        },
+    )
+}
+
+/// Creates a sparse, zero-filled disk image.
+fn create_empty_disk(path: &Path) -> Result<()> {
+    let file = fs::File::create(path)?;
+    file.set_len(TARGET_DISK_BYTES)?;
+    println!(
+        "created empty disk {} ({} MiB)",
+        path.display(),
+        TARGET_DISK_BYTES >> 20
+    );
+    Ok(())
 }
 
 /// Compiles the kernel crate for its bare-metal target and returns the path
@@ -239,8 +290,8 @@ fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
         })
 }
 
-/// Builds the QEMU command line for booting `image`.
-fn qemu_command(root: &Path, image: &Path, opts: &Options) -> Result<Command> {
+/// Builds the QEMU command line booting from the first of `disks`.
+fn qemu_command(root: &Path, disks: &Disks, opts: &Options) -> Result<Command> {
     let (ovmf_code, ovmf_vars) = find_ovmf()?;
     // UEFI writes to its variable store, so give QEMU a private copy.
     let vars_copy = root.join("target").join("OVMF_VARS.fd");
@@ -256,12 +307,22 @@ fn qemu_command(root: &Path, image: &Path, opts: &Options) -> Result<Command> {
         ))
         .arg("-drive")
         .arg(format!("if=pflash,format=raw,file={}", vars_copy.display()))
-        .arg("-drive")
-        .arg(format!("format=raw,file={}", image.display()))
         .args(["-serial", "stdio"])
         // Lets the kernel power off QEMU with an exit code (used by `poweroff` and tests).
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .arg("-no-reboot");
+    for (i, disk) in disks.0.iter().enumerate() {
+        cmd.arg("-drive")
+            .arg(format!(
+                "if=none,id=disk{i},format=raw,file={}",
+                disk.display()
+            ))
+            .arg("-device")
+            .arg(format!(
+                "virtio-blk-pci,drive=disk{i}{}",
+                if i == 0 { ",bootindex=0" } else { "" }
+            ));
+    }
 
     if Path::new("/dev/kvm").exists() && fs::File::open("/dev/kvm").is_ok() {
         cmd.args(["-accel", "kvm", "-cpu", "host"]);
@@ -275,31 +336,75 @@ fn qemu_command(root: &Path, image: &Path, opts: &Options) -> Result<Command> {
     Ok(cmd)
 }
 
-/// Shell commands sent to the kernel during `cargo run -- test`, each paired
-/// with a string that must appear in the output before the next is sent.
-const TEST_SCRIPT: &[(&str, &str)] = &[
-    ("selftest", "selftest: all checks passed"),
+/// One step of a test script: text to type (`None`: just wait) and text that
+/// must then appear on the console.
+type Step = (Option<&'static str>, &'static str);
+
+/// Stage 1: boot the installer image with an empty disk attached.
+const STAGE1: &[Step] = &[
+    (None, "shell ready"),
+    (Some("selftest"), "selftest: all checks passed"),
     (
-        "write notes.txt hello from the test",
+        Some("write notes.txt hello from the test"),
         "wrote 19 bytes to notes.txt",
     ),
-    ("cat notes.txt", "hello from the test"),
-    ("ls", "notes.txt"),
-    ("rm notes.txt", "removed notes.txt"),
-    ("hw", "\"pci_devices\""),
-    ("poweroff", "powering off"),
+    (Some("cat notes.txt"), "hello from the test"),
+    (Some("ls"), "notes.txt"),
+    (Some("rm notes.txt"), "removed notes.txt"),
+    (Some("hw"), "\"pci_devices\""),
+    (Some("disks"), "vd1"),
+    (Some("install"), "install llmos onto vd1"),
+    (Some("y"), "llmos is installed on vd1"),
+    (
+        Some("write kept.txt this survives a reboot"),
+        "wrote 22 bytes to kept.txt",
+    ),
+    (Some("poweroff"), "powering off"),
 ];
 
-/// Boots the image headless, waits for the shell prompt, runs
-/// [`TEST_SCRIPT`] over the serial console and checks the responses.
-fn run_boot_test(root: &Path, image: &Path, opts: &Options) -> Result<ExitCode> {
+/// Stage 2: boot from the freshly installed disk alone.
+const STAGE2: &[Step] = &[
+    (None, "shell ready"),
+    (Some("cat kept.txt"), "this survives a reboot"),
+    (Some("disks"), "llmos installed"),
+    (Some("poweroff"), "powering off"),
+];
+
+/// Runs both test stages: install onto a fresh disk, then boot from it.
+fn run_tests(root: &Path, image: &Path, opts: &Options) -> Result<ExitCode> {
+    let disk = root.join("target").join("test-disk.img");
+    let _ = fs::remove_file(&disk);
+    create_empty_disk(&disk)?;
+
+    println!("test stage 1: installer");
+    if !run_script(
+        root,
+        &Disks(vec![image.to_path_buf(), disk.clone()]),
+        opts,
+        STAGE1,
+    )? {
+        eprintln!("test: FAILED in stage 1");
+        return Ok(ExitCode::FAILURE);
+    }
+    println!("test stage 2: installed system");
+    if !run_script(root, &Disks(vec![disk]), opts, STAGE2)? {
+        eprintln!("test: FAILED in stage 2");
+        return Ok(ExitCode::FAILURE);
+    }
+    println!("test: PASSED");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Boots headless, plays `script` over the serial console and checks the
+/// responses. Returns `true` if every step passed and QEMU exited cleanly.
+fn run_script(root: &Path, disks: &Disks, opts: &Options, script: &[Step]) -> Result<bool> {
     let timeout = Duration::from_secs(
         env::var("LLMOS_TEST_TIMEOUT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(600),
     );
-    let mut child = qemu_command(root, image, opts)?
+    let mut child = qemu_command(root, disks, opts)?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -333,12 +438,13 @@ fn run_boot_test(root: &Path, image: &Path, opts: &Options) -> Result<ExitCode> 
     };
 
     let result = (|| -> Result<()> {
-        wait_for("shell ready")?;
-        for (command, expected) in TEST_SCRIPT {
-            println!("test: sending `{command}`");
-            stdin.write_all(command.as_bytes())?;
-            stdin.write_all(b"\r")?;
-            stdin.flush()?;
+        for (input, expected) in script {
+            if let Some(input) = input {
+                println!("test: sending `{input}`");
+                stdin.write_all(input.as_bytes())?;
+                stdin.write_all(b"\r")?;
+                stdin.flush()?;
+            }
             wait_for(expected)?;
         }
         Ok(())
@@ -346,7 +452,7 @@ fn run_boot_test(root: &Path, image: &Path, opts: &Options) -> Result<ExitCode> 
 
     let status = match result {
         Ok(()) => {
-            // `poweroff` was the last command; give QEMU a moment to exit.
+            // The last command powers off; give QEMU a moment to exit.
             let start = Instant::now();
             loop {
                 if let Some(status) = child.try_wait()? {
@@ -364,15 +470,5 @@ fn run_boot_test(root: &Path, image: &Path, opts: &Options) -> Result<ExitCode> 
         }
     };
     let _ = child.kill();
-
-    match status {
-        Some(status) if status.code() == Some(QEMU_EXIT_SUCCESS) => {
-            println!("test: PASSED");
-            Ok(ExitCode::SUCCESS)
-        }
-        other => {
-            eprintln!("test: FAILED (QEMU status: {other:?})");
-            Ok(ExitCode::FAILURE)
-        }
-    }
+    Ok(matches!(status, Some(s) if s.code() == Some(QEMU_EXIT_SUCCESS)))
 }

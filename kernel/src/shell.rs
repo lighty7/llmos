@@ -35,6 +35,8 @@ pub fn print_help() {
     println!("  cat <file>           print a file");
     println!("  write <file> <text>  create or overwrite a file");
     println!("  rm <file>            delete a file");
+    println!("  disks                list disks and partitions");
+    println!("  install [disk]       install llmos onto an empty disk");
     println!("  info                 hardware summary");
     println!("  hw                   full hardware inventory as JSON");
     println!("  mem                  memory usage");
@@ -144,6 +146,16 @@ fn handle_line(ctx: &mut Context, line: &str) {
         },
         "ask" => ask(ctx, rest),
         _ => match actions::from_command(line) {
+            // Typed commands run directly, except installing, which always
+            // shows its plan and asks first.
+            Some(Ok(action @ actions::Action::Install { .. })) => {
+                println!("{}", action.describe());
+                if confirm("This will write to the disk. Continue?") {
+                    action.execute(ctx);
+                } else {
+                    println!("cancelled");
+                }
+            }
             Some(Ok(action)) => action.execute(ctx),
             Some(Err(e)) => println!("error: {e}"),
             None => ask(ctx, line),

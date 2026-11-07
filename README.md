@@ -8,6 +8,11 @@ does not run code or touch hardware: it picks one action from a fixed, validated
 anything destructive needs your confirmation.
 
 ```text
+llmos> install llmos onto the empty disk
+{"action": "install"}
+llm -> install llmos onto vd1 (512 MiB): EFI system partition 176 MiB (boot loader, kernel, model) + data partition 64 MiB
+Allow this? [y/N] y
+llmos is installed on vd1. Files are now saved there; remove the boot media and reboot to start from it.
 llmos> create a file called hi.txt that says hello there
 {"action": "write_file", "path": "hi.txt", "content": "hello there"}
 llm -> write 11 bytes to hi.txt
@@ -16,8 +21,9 @@ llmos> cat hi.txt
 hello there
 ```
 
-> **Status:** experimental. Phases 1–5 of the [roadmap](#roadmap) work in QEMU (x86-64, UEFI).
-> Real hardware has not been tested yet.
+> **Status:** experimental. Phases 1–6 of the [roadmap](#roadmap) work in QEMU (x86-64, UEFI):
+> llmos can install itself onto an empty disk and keeps your files there. Real hardware has
+> not been tested yet.
 
 ## Features
 
@@ -27,7 +33,9 @@ hello there
 | CPU | GDT/TSS (double faults get their own stack), IDT with exception handlers, SSE2 enabled for the inference maths |
 | Memory | Page-table helpers, a physical frame allocator built from the UEFI memory map, a kernel heap (`alloc`) |
 | Devices | 8259 PIC, 100 Hz PIT timer, PS/2 keyboard (interrupt driven), COM1 serial port, framebuffer text console |
-| Inventory | CPUID, ACPI (RSDP/XSDT/MADT), PCI bus scan, all exported as JSON (`hw`) |
+| Inventory | CPUID, ACPI (RSDP/XSDT/MADT), PCI bus scan, disks, all exported as JSON (`hw`) |
+| Storage | virtio-blk driver (DMA, polled), GPT read/write with CRC-32, `llmfs` persistent files on a data partition |
+| Install | `install` copies the boot partition (bootloader, kernel, model) onto an empty disk and adds a data partition |
 | LLM | `no_std` Llama-architecture inference: f32 or int8 (Q8) weights, BPE tokenizer, KV cache, baked prompt cache |
 | Shell | Built-in commands plus natural-language requests through **grammar-constrained decoding** to validated actions |
 | Testing | Host unit tests, comparison against Hugging Face `transformers`, an automated QEMU boot test |
@@ -72,21 +80,24 @@ tens of seconds. See [models/README.md](models/README.md) for details.
 
 | Command | Purpose |
 |---------|---------|
-| `cargo run` | Build the kernel and disk image, then boot in QEMU |
+| `cargo run` | Build the kernel and disk image, then boot in QEMU with an empty second disk (`target/disk.img`) |
+| `cargo run -- run --installed` | Boot from the disk llmos was installed onto |
 | `cargo run -- run --headless` | Boot with no window (serial console only) |
 | `cargo run -- image` | Only build `target/llmos-uefi.img` |
-| `cargo run -- test` | Automated boot test: runs `selftest` and the file commands over serial |
+| `cargo run -- test` | Automated two-stage test: install onto a fresh disk, then boot from it and check persistence |
 | `cargo test --release -p llm` | Inference-engine tests (the reference tests need the model files) |
 | `cargo run --release -p llm --example agent_eval` | Measure how accurately the prompt maps requests to actions |
 
-Options: `--release`, `--model PATH`, `--no-model`, `--memory MIB`.
+Options: `--release`, `--model PATH`, `--no-model`, `--memory MIB`, `--no-disk`, `--installed`.
 
 ## Shell
 
 | Command | Description |
 |---------|-------------|
 | `help` | List the commands |
-| `ls`, `cat <f>`, `write <f> <text>`, `rm <f>` | In-memory files |
+| `ls`, `cat <f>`, `write <f> <text>`, `rm <f>` | Files (saved to disk once llmos is installed) |
+| `disks` | Disks, partitions and where files are stored |
+| `install [disk]` | Install llmos onto an empty disk. Shows the plan and asks first. |
 | `info` / `hw` | Hardware summary / full inventory as JSON |
 | `mem`, `uptime` | Memory usage, time since boot |
 | `model` | Model details and speed of the last request |
@@ -127,6 +138,7 @@ llmos/
 │       ├── gdt.rs, interrupts.rs, pic.rs, time.rs, cpu.rs       CPU and interrupts
 │       ├── memory.rs, allocator.rs                              Paging, frames, heap
 │       ├── inventory/        CPUID, ACPI, PCI
+│       ├── storage/          virtio-blk, GPT, llmfs, installer
 │       ├── fs.rs, actions.rs, shell.rs, agent.rs, selftest.rs
 ├── llm/                      Inference engine (no_std, host-testable)
 │   ├── src/                  format, tokenizer, model, constrained, agent, prompt_cache
@@ -145,7 +157,7 @@ llmos/
 3. ✅ Hardware inventory: ACPI, PCI, CPUID → JSON
 4. ✅ Inference: `no_std` transformer, Q8 weights, RAM-disk model, prompt cache
 5. ✅ LLM shell: natural language → constrained JSON → validated actions
-6. ⏳ Storage and install: virtio block driver, GPT, persistent files, installing llmos to a disk
+6. ✅ Storage and install: virtio block driver, GPT, persistent files, installing llmos to a disk
 7. ⏳ More hardware: AArch64 (Raspberry Pi class), RISC-V, remote management of microcontrollers
 
 ## Contributing

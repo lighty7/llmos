@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Phase 6, storage and installation:
+  - virtio-blk driver (legacy PCI interface, DMA, polled) and a `BlockDevice` abstraction,
+  - GPT reading and writing with CRC-32, and physically contiguous DMA buffers,
+  - `llmfs` persistent files on an llmos data partition, saved after every change,
+  - `install [disk]`: copies the boot partition onto an empty disk and adds a data partition,
+    always after confirmation,
+  - `disks` command, and disks in the hardware inventory and the LLM's machine summary,
+  - LLM actions `list_disks` and `install` (agent accuracy 17/20 on `agent_eval`),
+  - two-stage automated test: install onto a fresh disk, reboot from it, check the files.
+
 ## [0.2.0] - 2026-11-07
 
 The project was rewritten in Rust. The C prototype lives on the `c-initial-idea` branch.

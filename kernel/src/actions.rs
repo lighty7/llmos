@@ -16,7 +16,7 @@ use alloc::string::{String, ToString};
 use serde::Deserialize;
 
 use crate::framebuffer::Color;
-use crate::{console, fs, power, print, println};
+use crate::{console, fs, power, print, println, storage};
 
 /// Something the system can do on behalf of the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +57,13 @@ pub enum Action {
     Poweroff,
     /// Reboot the machine.
     Reboot,
+    /// List the disks and their partitions.
+    ListDisks,
+    /// Install llmos onto a disk (the only empty one if `disk` is `None`).
+    Install {
+        /// Target disk name, e.g. `vd1`.
+        disk: Option<String>,
+    },
 }
 
 /// Raw JSON shape produced by the LLM, before validation.
@@ -130,6 +137,8 @@ impl Action {
             },
             "poweroff" => Action::Poweroff,
             "reboot" => Action::Reboot,
+            "list_disks" => Action::ListDisks,
+            "install" => Action::Install { disk: None },
             other => return Err(ActionError::UnknownAction(other.into())),
         })
     }
@@ -139,7 +148,10 @@ impl Action {
     pub fn needs_confirmation(&self) -> bool {
         match self {
             Action::WriteFile { path, .. } => fs::exists(path),
-            Action::DeleteFile { .. } | Action::Poweroff | Action::Reboot => true,
+            Action::DeleteFile { .. }
+            | Action::Poweroff
+            | Action::Reboot
+            | Action::Install { .. } => true,
             _ => false,
         }
     }
@@ -161,6 +173,11 @@ impl Action {
             Action::Say { .. } => "reply".into(),
             Action::Poweroff => "power off the machine".into(),
             Action::Reboot => "reboot the machine".into(),
+            Action::ListDisks => "list disks".into(),
+            Action::Install { disk } => match storage::install::plan(disk.as_deref()) {
+                Ok(plan) => plan.describe(),
+                Err(e) => format!("install llmos (not possible: {e})"),
+            },
         }
     }
 
@@ -181,11 +198,17 @@ impl Action {
                 Err(e) => error(&e),
             },
             Action::WriteFile { path, content } => match fs::write(path, content.as_bytes()) {
-                Ok(()) => println!("wrote {} bytes to {path}", content.len()),
+                Ok(()) => {
+                    println!("wrote {} bytes to {path}", content.len());
+                    persist();
+                }
                 Err(e) => error(&e),
             },
             Action::DeleteFile { path } => match fs::remove(path) {
-                Ok(()) => println!("removed {path}"),
+                Ok(()) => {
+                    println!("removed {path}");
+                    persist();
+                }
                 Err(e) => error(&e),
             },
             Action::ShowHardware => ctx.inventory.print_summary(),
@@ -212,7 +235,42 @@ impl Action {
                 println!("rebooting");
                 power::reboot();
             }
+            Action::ListDisks => {
+                let disks = storage::disk_info();
+                if disks.is_empty() {
+                    println!("(no supported disks)");
+                }
+                for d in disks {
+                    println!(
+                        "  {:<5} {:>7} MiB  {:<16} {}",
+                        d.name,
+                        d.size_mib,
+                        d.role,
+                        d.partitions.join(", ")
+                    );
+                }
+                if let Some(name) = storage::mounted_disk() {
+                    println!("files are stored on {name}");
+                }
+            }
+            Action::Install { disk } => match storage::install::plan(disk.as_deref()) {
+                Ok(plan) => match plan.execute() {
+                    Ok(()) => println!(
+                        "llmos is installed on {}. Files are now saved there; remove the boot media and reboot to start from it.",
+                        plan.target_name()
+                    ),
+                    Err(e) => error(&e),
+                },
+                Err(e) => error(&e),
+            },
         }
+    }
+}
+
+/// Saves the files to the data partition, if one is mounted.
+fn persist() {
+    if let Err(e) = storage::sync() {
+        error(&alloc::format!("could not save to disk: {e}"));
     }
 }
 
@@ -257,6 +315,10 @@ pub fn from_command(line: &str) -> Option<Result<Action, String>> {
         "help" => Ok(Action::Help),
         "poweroff" | "shutdown" | "exit" => Ok(Action::Poweroff),
         "reboot" => Ok(Action::Reboot),
+        "disks" => Ok(Action::ListDisks),
+        "install" => Ok(Action::Install {
+            disk: rest.split_whitespace().next().map(String::from),
+        }),
         _ => return None,
     })
 }
