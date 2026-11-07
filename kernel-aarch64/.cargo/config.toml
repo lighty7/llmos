@@ -1,0 +1,13 @@
+# AArch64 kernel build configuration.
+#
+# `aarch64-llmos.json` is Rust's `aarch64-unknown-none` target made
+# position independent, so the kernel can relocate itself to wherever the
+# firmware loads it. Custom targets need `core`/`alloc` rebuilt (build-std).
+[build]
+target = "aarch64-llmos.json"
+rustflags = ["-C", "link-arg=-Tlinker.ld", "-C", "link-arg=-z", "-C", "link-arg=norelro"]
+
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true

@@ -9,6 +9,9 @@
 //! cargo run -- run --installed    # boot the disk llmos was installed onto
 //! cargo run -- image              # only build target/llmos-uefi.img
 //! cargo run -- test               # automated end-to-end test (CI)
+//! cargo run -- arm                # build the AArch64 kernel, boot it on QEMU `virt`
+//! cargo run -- arm --board raspi3b --dtb bcm2710-rpi-3-b.dtb   # ... or a Raspberry Pi 3
+//! cargo run -- arm-test           # automated AArch64 boot test
 //! ```
 //!
 //! The boot image is attached as a virtio disk (`vd0`). Unless `--no-disk` is
@@ -25,6 +28,8 @@
 //! * `--memory <MiB>`: guest RAM size (default 2048).
 //! * `--no-disk`: do not attach the installation target disk.
 //! * `--installed`: boot only from the installation target disk.
+//! * `--board <virt|raspi3b>` and `--dtb <path>`: AArch64 machine (`arm`
+//!   only); the Raspberry Pi model needs the board's device tree file.
 //!
 //! Environment variables:
 //!
@@ -61,6 +66,10 @@ enum Action {
     Image,
     /// Boot headless, drive the shell over serial and check the output.
     Test,
+    /// Build and boot the AArch64 kernel.
+    Arm,
+    /// Automated AArch64 boot test.
+    ArmTest,
 }
 
 /// Parsed command-line options.
@@ -73,6 +82,8 @@ struct Options {
     memory_mib: u32,
     target_disk: bool,
     installed: bool,
+    board: String,
+    dtb: Option<PathBuf>,
 }
 
 impl Options {
@@ -86,6 +97,8 @@ impl Options {
             memory_mib: 2048,
             target_disk: true,
             installed: false,
+            board: "virt".into(),
+            dtb: None,
         };
         let mut no_model = false;
         let mut args = env::args().skip(1);
@@ -94,6 +107,10 @@ impl Options {
                 "run" => opts.action = Action::Run,
                 "image" => opts.action = Action::Image,
                 "test" => opts.action = Action::Test,
+                "arm" => opts.action = Action::Arm,
+                "arm-test" => opts.action = Action::ArmTest,
+                "--board" => opts.board = args.next().ok_or("--board needs a name")?,
+                "--dtb" => opts.dtb = Some(PathBuf::from(args.next().ok_or("--dtb needs a path")?)),
                 "--release" => opts.release = true,
                 "--headless" => opts.headless = true,
                 "--no-model" => no_model = true,
@@ -121,7 +138,7 @@ impl Options {
         if no_model {
             opts.model = None;
         }
-        if opts.action == Action::Test {
+        if matches!(opts.action, Action::Test | Action::ArmTest) {
             opts.headless = true;
         }
         Ok(opts)
@@ -147,6 +164,27 @@ fn real_main() -> Result<ExitCode> {
     env::set_current_dir(&root)?;
     let target_dir = root.join("target");
     let target_disk = target_dir.join("disk.img");
+
+    if matches!(opts.action, Action::Arm | Action::ArmTest) {
+        let image = build_arm_kernel(&root, opts.release)?;
+        println!("AArch64 image: {}", image.display());
+        let cmd = arm_qemu_command(&image, &opts)?;
+        if opts.action == Action::Arm {
+            let status = { cmd }.status()?;
+            return Ok(if status.success() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            });
+        }
+        let ok = run_script_with(cmd, ARM_SCRIPT, Some(0))?;
+        println!("arm-test: {}", if ok { "PASSED" } else { "FAILED" });
+        return Ok(if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
 
     if opts.action == Action::Run && opts.installed {
         if !target_disk.exists() {
@@ -175,8 +213,116 @@ fn real_main() -> Result<ExitCode> {
             run_interactive(&root, &Disks(disks), &opts)
         }
         Action::Test => run_tests(&root, &image, &opts),
+        Action::Arm | Action::ArmTest => unreachable!("handled above"),
     }
 }
+
+/// Builds `kernel-aarch64` and converts it to a flat `kernel8.img`, the
+/// format QEMU's `-kernel` and the Raspberry Pi firmware load.
+fn build_arm_kernel(root: &Path, release: bool) -> Result<PathBuf> {
+    let dir = root.join("kernel-aarch64");
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let mut cmd = Command::new(&cargo);
+    cmd.arg("build").current_dir(&dir);
+    if release {
+        cmd.arg("--release");
+    }
+    for var in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_TARGET_DIR",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        cmd.env_remove(var);
+    }
+    println!("building AArch64 kernel...");
+    if !cmd.status()?.success() {
+        return Err("AArch64 kernel build failed".into());
+    }
+    let profile = if release { "release" } else { "debug" };
+    let elf = dir
+        .join("target")
+        .join("aarch64-llmos")
+        .join(profile)
+        .join("kernel-aarch64");
+
+    // llvm-objcopy ships with the `llvm-tools-preview` toolchain component.
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let sysroot = String::from_utf8(
+        Command::new(&rustc)
+            .args(["--print", "sysroot"])
+            .output()?
+            .stdout,
+    )?;
+    let host = String::from_utf8(
+        Command::new(&rustc)
+            .args(["--print", "host-tuple"])
+            .output()?
+            .stdout,
+    )?;
+    let objcopy = Path::new(sysroot.trim())
+        .join("lib/rustlib")
+        .join(host.trim())
+        .join("bin/llvm-objcopy");
+    let image = root.join("target").join("kernel8.img");
+    fs::create_dir_all(root.join("target"))?;
+    let status = Command::new(&objcopy)
+        .args(["-O", "binary"])
+        .arg(&elf)
+        .arg(&image)
+        .status()?;
+    if !status.success() {
+        return Err(format!("{} failed", objcopy.display()).into());
+    }
+    Ok(image)
+}
+
+/// QEMU command line for the AArch64 kernel.
+fn arm_qemu_command(image: &Path, opts: &Options) -> Result<Command> {
+    let mut cmd = Command::new("qemu-system-aarch64");
+    match opts.board.as_str() {
+        "virt" => {
+            cmd.args([
+                "-M",
+                "virt",
+                "-cpu",
+                "cortex-a72",
+                "-m",
+                &format!("{}M", opts.memory_mib),
+            ]);
+        }
+        "raspi3b" => {
+            let dtb = opts.dtb.as_ref().ok_or(
+                "--board raspi3b needs --dtb bcm2710-rpi-3-b.dtb (from the raspberrypi/firmware repository)",
+            )?;
+            cmd.args(["-M", "raspi3b", "-dtb"]).arg(dtb);
+        }
+        other => return Err(format!("unknown board `{other}` (use virt or raspi3b)").into()),
+    }
+    cmd.arg("-kernel")
+        .arg(image)
+        .args(["-serial", "stdio", "-no-reboot"]);
+    if let Some(model) = &opts.model {
+        cmd.arg("-initrd").arg(model);
+    }
+    if opts.headless {
+        cmd.args(["-display", "none"]);
+    }
+    Ok(cmd)
+}
+
+/// Script for `cargo run -- arm-test`.
+const ARM_SCRIPT: &[Step] = &[
+    (None, "shell ready"),
+    (Some("selftest"), "selftest: all checks passed"),
+    (
+        Some("write arm.txt hello from aarch64"),
+        "wrote 18 bytes to arm.txt",
+    ),
+    (Some("cat arm.txt"), "hello from aarch64"),
+    (Some("hw"), "\"cores\""),
+    (Some("poweroff"), "powering off"),
+];
 
 /// Boots the machine with the terminal attached to the serial console.
 fn run_interactive(root: &Path, disks: &Disks, opts: &Options) -> Result<ExitCode> {
@@ -398,13 +544,23 @@ fn run_tests(root: &Path, image: &Path, opts: &Options) -> Result<ExitCode> {
 /// Boots headless, plays `script` over the serial console and checks the
 /// responses. Returns `true` if every step passed and QEMU exited cleanly.
 fn run_script(root: &Path, disks: &Disks, opts: &Options, script: &[Step]) -> Result<bool> {
+    run_script_with(
+        qemu_command(root, disks, opts)?,
+        script,
+        Some(QEMU_EXIT_SUCCESS),
+    )
+}
+
+/// Runs `cmd` (a QEMU invocation), plays `script` over its serial console
+/// and returns `true` if every step passed and QEMU exited with `exit_code`.
+fn run_script_with(mut cmd: Command, script: &[Step], exit_code: Option<i32>) -> Result<bool> {
     let timeout = Duration::from_secs(
         env::var("LLMOS_TEST_TIMEOUT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(600),
     );
-    let mut child = qemu_command(root, disks, opts)?
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -470,5 +626,5 @@ fn run_script(root: &Path, disks: &Disks, opts: &Options, script: &[Step]) -> Re
         }
     };
     let _ = child.kill();
-    Ok(matches!(status, Some(s) if s.code() == Some(QEMU_EXIT_SUCCESS)))
+    Ok(matches!(status, Some(s) if s.code() == exit_code))
 }

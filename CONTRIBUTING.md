@@ -24,11 +24,12 @@ cargo run -- test --no-model                          # build and run the boot t
 ## Checks before a pull request
 
 ```bash
-cargo fmt --all && (cd kernel && cargo fmt)
-cargo clippy -p llm -p llmos && (cd kernel && cargo clippy)
+cargo fmt --all && (cd kernel && cargo fmt) && (cd kernel-aarch64 && cargo fmt)
+cargo clippy -p llm -p llmos && (cd kernel && cargo clippy) && (cd kernel-aarch64 && cargo clippy)
 cargo test -p llm                      # unit tests (fast)
 cargo test --release -p llm            # + reference tests if the model files exist
-cargo run -- test --no-model           # boots the kernel in QEMU and checks the shell
+cargo run -- test --no-model           # x86-64: install + reboot test in QEMU
+cargo run -- arm-test --no-model       # AArch64: boot test in QEMU virt
 ```
 
 ## Coding standards

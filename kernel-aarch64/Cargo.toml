@@ -1,0 +1,30 @@
+[package]
+name = "kernel-aarch64"
+description = "The llmos kernel for 64-bit ARM (QEMU virt, Raspberry Pi class boards)"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Built on its own for a custom bare-metal target, like `kernel/`.
+[workspace]
+
+[[bin]]
+name = "kernel-aarch64"
+test = false
+bench = false
+
+[dependencies]
+spin = "0.9.8"
+linked_list_allocator = "0.10.5"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+# The same inference engine as the x86-64 kernel.
+llm = { path = "../llm" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 2
+
+[profile.release]
+panic = "abort"

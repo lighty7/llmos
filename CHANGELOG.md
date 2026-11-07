@@ -17,6 +17,15 @@ All notable changes to this project are documented here. The format follows
   - `disks` command, and disks in the hardware inventory and the LLM's machine summary,
   - LLM actions `list_disks` and `install` (agent accuracy 17/20 on `agent_eval`),
   - two-stage automated test: install onto a fresh disk, reboot from it, check the files.
+- Phase 7, AArch64 port (`kernel-aarch64/`):
+  - self-relocating static-PIE kernel with a Linux arm64 image header (QEMU `virt`,
+    Raspberry Pi firmware),
+  - EL2→EL1 drop, NEON, exception vectors, identity-mapped MMU with caches,
+  - device-tree parser (memory, UART, initrd, CPUs, PSCI, `ranges` translation),
+  - PL011 UART driver, a bootstrap allocator followed by the heap, the generic timer,
+    PSCI power-off and reset,
+  - serial shell running the same `llm` agent, with the model loaded as an initrd,
+  - runner commands `cargo run -- arm` (also `--board raspi3b --dtb FILE`) and `arm-test`.
 
 ## [0.2.0] - 2026-11-07
 

@@ -10,7 +10,7 @@ anything destructive needs your confirmation.
 ```text
 llmos> install llmos onto the empty disk
 {"action": "install"}
-llm -> install llmos onto vd1 (512 MiB): EFI system partition 176 MiB (boot loader, kernel, model) + data partition 64 MiB
+llm -> install llmos onto vd1 (512 MiB): EFI system partition 174 MiB (boot loader, kernel, model) + data partition 64 MiB
 Allow this? [y/N] y
 llmos is installed on vd1. Files are now saved there; remove the boot media and reboot to start from it.
 llmos> create a file called hi.txt that says hello there
@@ -21,9 +21,10 @@ llmos> cat hi.txt
 hello there
 ```
 
-> **Status:** experimental. Phases 1–6 of the [roadmap](#roadmap) work in QEMU (x86-64, UEFI):
-> llmos can install itself onto an empty disk and keeps your files there. Real hardware has
-> not been tested yet.
+> **Status:** experimental. All phases of the [roadmap](#roadmap) so far work in QEMU. On
+> x86-64 (UEFI), llmos can install itself onto an empty disk and keeps your files there. The
+> AArch64 port boots on QEMU `virt` and on QEMU's Raspberry Pi 3 model and runs the same
+> LLM. Physical hardware has not been tested yet.
 
 ## Features
 
@@ -38,7 +39,8 @@ hello there
 | Install | `install` copies the boot partition (bootloader, kernel, model) onto an empty disk and adds a data partition |
 | LLM | `no_std` Llama-architecture inference: f32 or int8 (Q8) weights, BPE tokenizer, KV cache, baked prompt cache |
 | Shell | Built-in commands plus natural-language requests through **grammar-constrained decoding** to validated actions |
-| Testing | Host unit tests, comparison against Hugging Face `transformers`, an automated QEMU boot test |
+| AArch64 | Self-relocating Linux-style image, EL2→EL1, MMU, device tree, PL011, model as initrd ([docs/aarch64.md](docs/aarch64.md)) |
+| Testing | Host unit tests, comparison against Hugging Face `transformers`, automated QEMU tests (x86-64 and AArch64) |
 
 ## Quick start
 
@@ -49,7 +51,7 @@ hello there
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # QEMU and UEFI firmware (Ubuntu/Debian; use your distribution's equivalents)
-sudo apt install qemu-system-x86 ovmf python3-numpy
+sudo apt install qemu-system-x86 ovmf python3-numpy   # + qemu-system-arm for the ARM port
 ```
 
 ### 2. Boot without a model (built-in commands only)
@@ -85,6 +87,7 @@ tens of seconds. See [models/README.md](models/README.md) for details.
 | `cargo run -- run --headless` | Boot with no window (serial console only) |
 | `cargo run -- image` | Only build `target/llmos-uefi.img` |
 | `cargo run -- test` | Automated two-stage test: install onto a fresh disk, then boot from it and check persistence |
+| `cargo run -- arm` / `arm-test` | Build the AArch64 kernel and boot it on QEMU `virt` (`--board raspi3b --dtb FILE` for the Pi 3 model) / test it |
 | `cargo test --release -p llm` | Inference-engine tests (the reference tests need the model files) |
 | `cargo run --release -p llm --example agent_eval` | Measure how accurately the prompt maps requests to actions |
 
@@ -140,6 +143,7 @@ llmos/
 │       ├── inventory/        CPUID, ACPI, PCI
 │       ├── storage/          virtio-blk, GPT, llmfs, installer
 │       ├── fs.rs, actions.rs, shell.rs, agent.rs, selftest.rs
+├── kernel-aarch64/            The AArch64 kernel (boot.rs, dtb.rs, mmu.rs, uart.rs, shell.rs)
 ├── llm/                      Inference engine (no_std, host-testable)
 │   ├── src/                  format, tokenizer, model, constrained, agent, prompt_cache
 │   ├── src/bin/llm-bake.rs   Bakes the prompt cache into a model file
@@ -147,7 +151,7 @@ llmos/
 │   └── tests/reference.rs    Comparison against Hugging Face transformers
 ├── tools/                    export_model.py, make_test_vectors.py
 ├── models/                   Model files go here (git-ignored)
-└── docs/                     architecture.md, model-format.md
+└── docs/                     architecture.md, model-format.md, aarch64.md
 ```
 
 ## Roadmap
@@ -158,7 +162,9 @@ llmos/
 4. ✅ Inference: `no_std` transformer, Q8 weights, RAM-disk model, prompt cache
 5. ✅ LLM shell: natural language → constrained JSON → validated actions
 6. ✅ Storage and install: virtio block driver, GPT, persistent files, installing llmos to a disk
-7. ⏳ More hardware: AArch64 (Raspberry Pi class), RISC-V, remote management of microcontrollers
+7. ✅ AArch64 port: QEMU `virt` and the Raspberry Pi 3 model, sharing the LLM core
+8. ⏳ Next: physical hardware, AHCI/NVMe drivers, ARM storage and interrupts, RISC-V, SMP,
+   remote management of microcontrollers
 
 ## Contributing
 

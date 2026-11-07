@@ -149,6 +149,14 @@ only the remaining ~50 tokens once, and rewinds to that point for every request.
 The classifier (vocabulary × dim) is the largest single matrix. Constrained decoding avoids
 most of it by scoring only the allowed tokens.
 
+## Portability
+
+The `llm` crate and `kernel/src/fs.rs` contain no architecture-specific code. The AArch64
+kernel (`kernel-aarch64/`, see [aarch64.md](aarch64.md)) reuses them unchanged, together
+with the same model file and prompt cache. Only the platform layer is rewritten: boot,
+interrupts, MMU, device discovery (device tree instead of ACPI/PCI) and the UART. A third
+architecture (for example RISC-V) needs the same platform pieces and nothing else.
+
 ## Known limitations
 
 * Single core; no SMP or scheduler yet.
