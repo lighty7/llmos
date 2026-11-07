@@ -1,23 +1,21 @@
-# Build artifacts
-build/
-*.o
-*.bin
-*.img
-*.iso
-*.img
+# Cargo build output (host workspace and kernel)
+/target/
+/kernel/target/
 
-# Editor
+# Model weights are large binaries: download/convert them with
+# `tools/export_model.py`, never commit them.
+/models/*
+!/models/README.md
+
+# Python bytecode from the tools
+__pycache__/
+
+# Editors / OS
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS
+*~
 .DS_Store
 Thumbs.db
-
-# Backup
-*~
-
-# Log files
 *.log

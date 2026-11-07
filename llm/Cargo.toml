@@ -1,0 +1,11 @@
+[package]
+name = "llm"
+description = "no_std transformer inference engine used by the llmos kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Pure-Rust math functions (exp, sqrt, sin, cos, ...) for `no_std` code.
+libm = "0.2.16"

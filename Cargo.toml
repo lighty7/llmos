@@ -1,0 +1,33 @@
+# Host-side workspace.
+#
+# * The root package (`llmos`) is the build-and-run tool: it compiles the
+#   kernel, packs it into a bootable UEFI disk image and launches QEMU.
+# * `llm` is the platform-independent inference engine. It is `no_std`, so the
+#   kernel can use it, but it is also tested on the host with `cargo test`.
+#
+# The kernel itself is *not* a workspace member: it is built for a custom
+# bare-metal target (see `kernel/.cargo/config.toml`), which the host workspace
+# cannot build. The runner invokes Cargo inside `kernel/` instead.
+[workspace]
+members = ["llm"]
+exclude = ["kernel"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/lighty7/llmos"
+
+[package]
+name = "llmos"
+description = "Build, image and run tool for the llmos kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "llmos"
+
+[dependencies]
+# Host library that turns a kernel ELF into a bootable UEFI disk image.
+bootloader = { version = "0.11.17", default-features = false, features = ["uefi"] }

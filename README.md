@@ -1,281 +1,160 @@
-# llmos - LLM-Integrated Operating System
+# llmos
 
-A custom x86-64 operating system kernel where the LLM is the primary shell interface. Users type natural language commands, the LLM interprets them, and executes system actions.
+**An operating system kernel, written in Rust, whose shell is a language model.**
 
-## Overview
+llmos boots on bare metal through UEFI, works out what hardware the machine has, loads a
+small LLM from the boot disk and lets you operate the computer in plain English. The model
+does not run code or touch hardware: it picks one action from a fixed, validated list, and
+anything destructive needs your confirmation.
 
-llmos is a from-scratch operating system with:
-
-- **Custom x86-64 kernel** written in C
-- **Bootloader** that switches to long mode and loads the kernel
-- **FAT16 filesystem** for persistent storage
-- **VGA text mode** for display
-- **PS/2 keyboard** driver for input
-- **Embedded TinyLlama-1.1B** as the shell interface
-
-## Architecture
-
+```text
+llmos> create a file called hi.txt that says hello there
+{"action": "write_file", "path": "hi.txt", "content": "hello there"}
+llm -> write 11 bytes to hi.txt
+wrote 11 bytes to hi.txt
+llmos> cat hi.txt
+hello there
 ```
-┌─────────────────────────────────────────┐
-│           LLM Shell (User)              │
-│  "open file, type hello, save"          │
-│  ↓                                      │
-│  LLM interprets → JSON action           │
-│  ↓                                      │
-│  System calls (file, process, etc)      │
-└─────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────┐
-│         Kernel (C)                       │
-│  - Memory management (paging)           │
-│  - Process scheduler                     │
-│  - FAT16 filesystem                      │
-│  - Device drivers (VGA, Keyboard)       │
-│  - System call interface                │
-└─────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────┐
-│         Bootloader                      │
-│  - BIOS/UEFI boot                       │
-│  - Long mode setup                      │
-│  - Kernel loading                       │
-└─────────────────────────────────────────┘
-```
+
+> **Status:** experimental. Phases 1–5 of the [roadmap](#roadmap) work in QEMU (x86-64, UEFI).
+> Real hardware has not been tested yet.
 
 ## Features
 
-| Feature | Status |
-|---------|--------|
-| Bootloader | ✅ Basic |
-| VGA Text Output | ✅ Basic |
-| Keyboard Input | ✅ Basic |
-| Memory Management | ✅ Paging |
-| GDT/IDT | ✅ Interrupts |
-| FAT16 Filesystem | 🔄 In Progress |
-| LLM Integration | 🔄 In Progress |
-| Natural Language Shell | 🔄 In Progress |
+| Area | What exists |
+|------|-------------|
+| Boot | UEFI via the [`bootloader`](https://github.com/rust-osdev/bootloader) crate. The model ships as a RAM disk. |
+| CPU | GDT/TSS (double faults get their own stack), IDT with exception handlers, SSE2 enabled for the inference maths |
+| Memory | Page-table helpers, a physical frame allocator built from the UEFI memory map, a kernel heap (`alloc`) |
+| Devices | 8259 PIC, 100 Hz PIT timer, PS/2 keyboard (interrupt driven), COM1 serial port, framebuffer text console |
+| Inventory | CPUID, ACPI (RSDP/XSDT/MADT), PCI bus scan, all exported as JSON (`hw`) |
+| LLM | `no_std` Llama-architecture inference: f32 or int8 (Q8) weights, BPE tokenizer, KV cache, baked prompt cache |
+| Shell | Built-in commands plus natural-language requests through **grammar-constrained decoding** to validated actions |
+| Testing | Host unit tests, comparison against Hugging Face `transformers`, an automated QEMU boot test |
 
-## Requirements
+## Quick start
 
-### Host System
-- Linux (Ubuntu 22.04+ recommended)
-- GCC (cross-compiler for x86-64)
-- NASM assembler
-- QEMU (for testing)
-- Make
-- Git
-
-### Target System (minimum)
-- x86-64 CPU
-- 2GB RAM
-- Keyboard
-- VGA display
-
-## Quick Start
-
-### 1. Install Dependencies
+### 1. Install the prerequisites
 
 ```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install build-essential nasm qemu-system-x86 git make gcc-multilib clang
+# Rust: the pinned nightly is installed automatically from rust-toolchain.toml
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Verify installations
-nasm --version
-qemu-system-x86_64 --version
-gcc --version
+# QEMU and UEFI firmware (Ubuntu/Debian; use your distribution's equivalents)
+sudo apt install qemu-system-x86 ovmf python3-numpy
 ```
 
-### 2. Clone & Build
+### 2. Boot without a model (built-in commands only)
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/llmos.git
-cd llmos
-make
+cargo run -- run --no-model
 ```
 
-### 3. Run in QEMU
+A QEMU window opens. The same console is mirrored on your terminal over the serial port.
+Type `help` in either.
+
+### 3. Add the language model
 
 ```bash
-make run
+# Download SmolLM2-135M-Instruct (Apache-2.0, ~270 MB) and convert it (~140 MB, int8)
+python3 tools/export_model.py --download HuggingFaceTB/SmolLM2-135M-Instruct
+# Optional but strongly recommended: pre-compute the fixed part of the prompt
+cargo run --release -p llm --bin llm-bake
+# Boot with the model (models/llmos.model is picked up automatically)
+cargo run
 ```
 
-### 4. Build for Real Hardware
+On Linux with KVM, inference runs at near-native speed (around 20 tokens/s on one core).
+Without KVM, QEMU emulates the CPU in software at roughly 1 token/s, so each request takes
+tens of seconds. See [models/README.md](models/README.md) for details.
 
-```bash
-make usb
-# Then write to USB: sudo dd if=build/llmos.bin of=/dev/sdX bs=512
+### Runner commands
+
+| Command | Purpose |
+|---------|---------|
+| `cargo run` | Build the kernel and disk image, then boot in QEMU |
+| `cargo run -- run --headless` | Boot with no window (serial console only) |
+| `cargo run -- image` | Only build `target/llmos-uefi.img` |
+| `cargo run -- test` | Automated boot test: runs `selftest` and the file commands over serial |
+| `cargo test --release -p llm` | Inference-engine tests (the reference tests need the model files) |
+| `cargo run --release -p llm --example agent_eval` | Measure how accurately the prompt maps requests to actions |
+
+Options: `--release`, `--model PATH`, `--no-model`, `--memory MIB`.
+
+## Shell
+
+| Command | Description |
+|---------|-------------|
+| `help` | List the commands |
+| `ls`, `cat <f>`, `write <f> <text>`, `rm <f>` | In-memory files |
+| `info` / `hw` | Hardware summary / full inventory as JSON |
+| `mem`, `uptime` | Memory usage, time since boot |
+| `model` | Model details and speed of the last request |
+| `ask <request>` | Send a request to the LLM. Any unknown input is sent there too. |
+| `selftest` | In-kernel checks of interrupts, the heap, devices and action validation |
+| `clear`, `reboot`, `poweroff` | Clear the screen, restart, power off |
+
+## How the LLM shell works
+
+```text
+ "make a note that says buy milk"
+        │
+        ▼
+ prompt = instructions + examples + hardware summary + request      (ChatML)
+        │                      └── baked KV cache ──┘ └ processed once per boot
+        ▼
+ constrained decoder:  {"action": "▢", "path": "▢", "content": "▢"}
+        │   the model only fills ▢, and only with tokens valid at that point
+        ▼
+ Action::from_json  →  validation (known action, legal file name, ...)
+        │
+        ▼
+ confirmation for destructive actions  →  execute
 ```
 
-## Project Structure
+The kernel never runs model output as code. The model can only choose from the
+actions in `llm::agent::SHELL_ACTIONS`. See [docs/architecture.md](docs/architecture.md).
 
-```
+## Repository layout
+
+```text
 llmos/
-├── README.md              # This file
-├── Makefile               # Build system
-├── CONTRIBUTING.md        # Contribution guidelines
-│
-├── bootloader/           # Bootloader code
-│   ├── boot.S            # Boot sector (assembly)
-│   ├── main.c            # Bootloader C code
-│   ├── linker.ld        # Linker script
-│   └── Makefile         # Bootloader build
-│
-├── kernel/               # Kernel source
-│   ├── src/
-│   │   ├── main.c       # Kernel entry point
-│   │   ├── memory.c     # Memory management
-│   │   ├── paging.c     # Page table setup
-│   │   ├── gdt.c        # Global Descriptor Table
-│   │   ├── idt.c        # Interrupt Descriptor Table
-│   │   ├── keyboard.c   # Keyboard driver
-│   │   ├── vga.c        # VGA text mode driver
-│   │   ├── fs.c         # FAT16 filesystem
-│   │   ├── process.c    # Process management
-│   │   ├── syscall.c    # System calls
-│   │   └── shell.c      # LLM shell interface
-│   ├── include/
-│   │   ├── kernel.h
-│   │   ├── memory.h
-│   │   ├── vga.h
-│   │   ├── keyboard.h
-│   │   ├── fs.h
-│   │   └── syscall.h
-│   ├── linker.ld        # Kernel linker script
-│   └── Makefile         # Kernel build
-│
-├── llm/                  # LLM integration
-│   ├── shell.c          # LLM shell
-│   ├── shell.h          # Shell header
-│   ├── model/           # Model files
-│   │   └── README.md    # Instructions to add TinyLlama
-│   └── Makefile
-│
-├── tools/               # Build utilities
-│   ├── build.sh         # Main build script
-│   └── iso.sh          # ISO creation
-│
-└── docs/                # Documentation
-    ├── architecture.md
-    ├── syscall.md
-    └── filesystem.md
+├── Cargo.toml, src/main.rs   Runner: builds the kernel, creates the UEFI image, starts QEMU
+├── kernel/                   The kernel (no_std, custom x86_64-llmos target)
+│   └── src/
+│       ├── main.rs           Boot sequence
+│       ├── serial.rs, framebuffer.rs, console.rs, keyboard.rs   I/O
+│       ├── gdt.rs, interrupts.rs, pic.rs, time.rs, cpu.rs       CPU and interrupts
+│       ├── memory.rs, allocator.rs                              Paging, frames, heap
+│       ├── inventory/        CPUID, ACPI, PCI
+│       ├── fs.rs, actions.rs, shell.rs, agent.rs, selftest.rs
+├── llm/                      Inference engine (no_std, host-testable)
+│   ├── src/                  format, tokenizer, model, constrained, agent, prompt_cache
+│   ├── src/bin/llm-bake.rs   Bakes the prompt cache into a model file
+│   ├── examples/agent_eval.rs
+│   └── tests/reference.rs    Comparison against Hugging Face transformers
+├── tools/                    export_model.py, make_test_vectors.py
+├── models/                   Model files go here (git-ignored)
+└── docs/                     architecture.md, model-format.md
 ```
-
-## Using llmos
-
-### Basic Commands
-
-The LLM shell accepts natural language:
-
-```
-You: open a text document and type hello world
-llmos: [creates file, writes "hello world", displays success]
-
-You: list my files
-llmos: [lists directory contents]
-
-You: create a new folder called projects
-llmos: [creates directory]
-```
-
-### System Commands
-
-| Command | Action |
-|---------|--------|
-| `help` | Show available commands |
-| `exit` | Shutdown system |
-| `clear` | Clear screen |
-| `reboot` | Reboot system |
-
-## LLM Integration
-
-### Adding the Model
-
-1. Download TinyLlama-1.1B Q4 quantized:
-```bash
-# From https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF
-# Download tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
-cp tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf llm/model/
-```
-
-2. Build with LLM support:
-```bash
-make llm-enabled
-```
-
-### System Prompt
-
-The LLM is configured with a system prompt that instructs it to:
-- Parse natural language commands
-- Output JSON actions
-- Have access to: file operations, process control, system info
-
-## Development
-
-### Building
-
-```bash
-# Clean build
-make clean
-
-# Full build
-make
-
-# Debug build (with debug symbols)
-make debug
-
-# Just kernel
-make kernel
-
-# Just bootloader
-make bootloader
-```
-
-### Testing
-
-```bash
-# Run in QEMU (with display)
-make run
-
-# Run in QEMU (serial only, faster)
-make run-no-gui
-
-# Run with GDB
-make debug
-```
-
-### Adding New System Calls
-
-1. Define syscall number in `kernel/include/syscall.h`
-2. Implement in `kernel/src/syscall.c`
-3. Add to syscall table
-4. Call from shell/LLM
 
 ## Roadmap
 
-- [ ] Basic bootloader → kernel boot
-- [ ] VGA text output
-- [ ] Keyboard input
-- [ ] Memory management (paging)
-- [ ] Interrupt handling (IDT/GDT)
-- [ ] FAT16 filesystem
-- [ ] System call interface
-- [ ] Basic shell (CLI)
-- [ ] LLM integration (TinyLlama)
-- [ ] Natural language command parsing
-- [ ] Real hardware boot support
-
-## Resources
-
-- [OSDev Wiki](https://wiki.osdev.org/)
-- [llama.cpp](https://github.com/ggerganov/llama.cpp)
-- [TinyLlama](https://github.com/jzhang38/TinyLlama)
-- [Writing a Simple Operating System from Scratch](https://www.cs.bham.ac.uk/~exr/lectures/opsys/10_11/lectures/os-dev.pdf)
-
-## License
-
-MIT License - See LICENSE file
+1. ✅ First boot: UEFI image, serial and framebuffer output
+2. ✅ Kernel core: GDT/IDT, exceptions, PIC/PIT, keyboard, paging, heap
+3. ✅ Hardware inventory: ACPI, PCI, CPUID → JSON
+4. ✅ Inference: `no_std` transformer, Q8 weights, RAM-disk model, prompt cache
+5. ✅ LLM shell: natural language → constrained JSON → validated actions
+6. ⏳ Storage and install: virtio block driver, GPT, persistent files, installing llmos to a disk
+7. ⏳ More hardware: AArch64 (Raspberry Pi class), RISC-V, remote management of microcontrollers
 
 ## Contributing
 
-See CONTRIBUTING.md for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE). Model weights you download keep their own licence.
+SmolLM2 is released under Apache-2.0.
+
+The original C prototype is preserved on the `c-initial-idea` branch.

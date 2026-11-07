@@ -1,0 +1,16 @@
+# Kernel build configuration.
+#
+# The kernel targets `x86_64-llmos.json`, a copy of Rust's built-in
+# `x86_64-unknown-none` target with one change: SSE2 is enabled and the
+# soft-float ABI is disabled. x86-64 guarantees SSE2, UEFI firmware leaves it
+# enabled, and the LLM inference code is far too slow with software floats.
+#
+# Because this is a custom target, `core` and `alloc` are not shipped
+# precompiled, so we rebuild them from source with `build-std`.
+[build]
+target = "x86_64-llmos.json"
+
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true

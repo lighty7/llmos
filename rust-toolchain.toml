@@ -1,0 +1,13 @@
+# Pinned toolchain for reproducible builds.
+#
+# llmos needs nightly Rust because the kernel is built with `-Z build-std`
+# (compiling `core`/`alloc` for our custom bare-metal target) and the
+# `bootloader` crate builds its UEFI stage the same way.
+#
+# To upgrade: change the date, run `cargo run -- test`, and record the change
+# in CHANGELOG.md.
+[toolchain]
+channel = "nightly-2026-11-07"
+components = ["rust-src", "llvm-tools-preview", "rustfmt", "clippy"]
+targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]
+profile = "minimal"

@@ -1,0 +1,44 @@
+[package]
+name = "kernel"
+description = "The llmos kernel"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# The kernel is built on its own (custom target), not as part of the host
+# workspace in the repository root.
+[workspace]
+
+[[bin]]
+name = "kernel"
+test = false
+bench = false
+
+[dependencies]
+# Boot protocol: entry point macro, `BootInfo` (memory map, framebuffer, ...).
+bootloader_api = "0.11.17"
+# Safe wrappers for x86-64 structures: page tables, GDT/IDT, control registers.
+x86_64 = "0.15.2"
+# Spinlock-based `Mutex`/`Once` for global kernel state.
+spin = "0.9.8"
+# Heap allocator backing `alloc` (Vec, String, Box, ...).
+linked_list_allocator = "0.10.5"
+# Pre-rendered bitmap font for the framebuffer console.
+noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin", "unicode-specials"] }
+# CPUID decoding for the hardware inventory.
+raw-cpuid = "11.6.0"
+# JSON for the hardware inventory report and LLM actions.
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+# Inference engine shared with the host test-suite.
+llm = { path = "../llm" }
+
+[profile.dev]
+panic = "abort"
+# Inference is unusably slow without optimisations, even while debugging.
+opt-level = 2
+
+[profile.release]
+panic = "abort"
+debug = 1

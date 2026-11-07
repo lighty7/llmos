@@ -1,116 +1,133 @@
-# llmos Architecture
+# llmos architecture
 
-## Overview
+This document describes how llmos is put together and why. It is meant as the starting point
+for anyone changing the kernel or the inference engine.
 
-llmos is a custom x86-64 operating system kernel with integrated LLM shell. It follows a monolithic kernel architecture with a userspace shell that interprets natural language.
+## Design principles
 
-## System Layers
+1. **Deterministic code discovers and controls hardware. The LLM only decides.** Hardware
+   enumeration reads firmware tables and device registers exactly. The language model reads a
+   *summary* of the result and chooses among predefined actions.
+2. **Model output is data, never code.** Decoding is constrained to a JSON grammar. The JSON is
+   validated, and destructive actions need confirmation.
+3. **One inference engine everywhere.** The `llm` crate is `no_std`, so the kernel and the host
+   tests run identical code, and correctness can be checked against Hugging Face
+   `transformers` on a normal machine.
+4. **Small, documented, replaceable parts.** Most drivers are short and written from first
+   principles. Crates are used where correctness is subtle (`x86_64` page tables, `bootloader`).
 
-```
-┌─────────────────────────────────────────────┐
-│           Userspace                          │
-│  ┌─────────────────────────────────────┐    │
-│  │     LLM Shell                        │    │
-│  │  - Natural language input           │    │
-│  │  - Command parsing                  │    │
-│  │  - Action execution                 │    │
-│  └─────────────────────────────────────┘    │
-└─────────────────────────────────────────────┘
-                    ↓ System Calls
-┌─────────────────────────────────────────────┐
-│              Kernel                          │
-│  ┌─────────────────────────────────────┐    │
-│  │  Process Management                 │    │
-│  │  Memory Management (Paging)         │    │
-│  │  File System (FAT16)                │    │
-│  │  Device Drivers                     │    │
-│  │  System Call Interface              │    │
-│  └─────────────────────────────────────┘    │
-└─────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────┐
-│           Bootloader                         │
-│  - BIOS/UEFI Boot                            │
-│  - Protected Mode → Long Mode               │
-│  - Kernel Loading                            │
-└─────────────────────────────────────────────┘
+## Boot flow
+
+```text
+UEFI firmware (OVMF in QEMU)
+  └─ bootloader (UEFI app from the `bootloader` crate)
+       • loads the kernel ELF and the RAM disk (the model file) from the FAT EFI partition
+       • sets up 4-level paging and maps all physical memory at a dynamic offset
+       • collects the memory map, framebuffer, RSDP address
+  └─ kernel_main(&BootInfo)                       kernel/src/main.rs
+       1. serial + framebuffer console
+       2. SSE on (CR0/CR4), GDT + TSS, IDT
+       3. OffsetPageTable, frame allocator, heap (half of free RAM, 16–512 MiB)
+       4. PIC remap, PIT at 100 Hz, enable interrupts
+       5. Inventory: CPUID, ACPI, PCI
+       6. Agent: parse the model in place from the RAM disk
+       7. Shell loop
 ```
 
-## Memory Layout
+The image is built on the host by the runner (`src/main.rs`) with
+`bootloader::DiskImageBuilder`: a GPT disk with a FAT EFI system partition holding
+`efi/boot/bootx64.efi`, the kernel and the `ramdisk`.
 
-```
-0x00000000 - 0x000FFFFF    BIOS/IVT (1MB)
-0x000F0000 - 0x000FFFFF    BIOS Area
-0x00100000 - 0x0FFFFFFF   Kernel (16MB - loaded at 1MB)
-0x10000000 -               Free Memory
-0xB8000 - 0xBFFFF         VGA Text Buffer
-0xFFFFFFFF80000000+        Kernel Virtual Addresses
-```
+## Kernel modules
 
-## Boot Process
+| Module | Responsibility |
+|--------|----------------|
+| `serial` | 16550 UART on COM1: polled output and input. Used for logs, the remote shell and tests. |
+| `framebuffer`, `console` | Pixel text console. The `print!`/`println!` macros write to serial and screen. |
+| `cpu` | Enable SSE/FXSR. |
+| `gdt` | GDT with kernel segments and a TSS whose IST\[0\] is the double-fault stack. |
+| `interrupts` | IDT: exception handlers (panic with diagnostics), breakpoint, timer and keyboard IRQs. |
+| `pic`, `time` | 8259 remapping and EOI. PIT tick counter, uptime and sleeping. |
+| `keyboard` | Scancode set 1 decoding into a lock-free SPSC ring buffer, filled from IRQ 1. |
+| `memory` | `OffsetPageTable`, `phys_to_virt`, frame allocator over `Usable` regions. |
+| `allocator` | Maps the heap range and installs `linked_list_allocator` as the global allocator. |
+| `inventory` | `CpuInfo` (CPUID), `acpi` (RSDP→XSDT→MADT), `pci` (configuration ports 0xCF8/0xCFC). |
+| `fs` | Flat in-memory file system (`BTreeMap<String, Vec<u8>>`). |
+| `actions` | The `Action` enum: JSON parsing, validation, confirmation policy, execution. |
+| `agent` | Owns the model and inference state. Builds prompts, caches the prefix, decodes actions. |
+| `shell` | Line editor (keyboard + serial) and command dispatch. |
+| `selftest` | Checks run on the live system. |
 
-1. **BIOS**: Loads first 512 bytes from boot device
-2. **Boot Sector**: Enables A20, loads GDT, enables protected mode
-3. **32-bit Mode**: Setup PAE, page tables
-4. **64-bit Mode**: Load kernel, jump to kernel_main()
+### Interrupt safety
 
-## System Calls
+* The keyboard queue is lock-free, so the IRQ handler can never deadlock against the code it
+  interrupted.
+* Console output disables interrupts while it holds the serial and screen locks.
+* Nothing allocates in interrupt context.
 
-| Number | Name | Description |
-|--------|------|-------------|
-| 1 | write | Write to screen |
-| 2 | read | Read input |
-| 3 | create | Create file |
-| 4 | close | Close file |
-| 5 | open | Open file |
-| 6 | delete | Delete file |
-| 7 | list | List directory |
-| 8 | exit | Exit/shutdown |
-| 9 | getmem | Get memory info |
-| 10 | clear | Clear screen |
+## The inference engine (`llm`)
 
-## File System
+| Module | Responsibility |
+|--------|----------------|
+| `format` | Header parsing and validation of the `.model` file ([model-format.md](model-format.md)). |
+| `tokenizer` | Byte-level BPE: special tokens, digit splitting, GPT-2 pre-tokenisation regex, merges. |
+| `model` | Forward pass: RMSNorm, RoPE ("rotate half"), grouped-query attention with a KV cache, SwiGLU. f32 or Q8 matmuls. |
+| `math` | Vectorisable dot products, softmax, norms, `libm` wrappers. |
+| `constrained` | Grammar-constrained decoding of `{"action": ..., fields...}`. |
+| `agent` | The action list and prompt shared by the kernel and the evaluation harness. |
+| `prompt_cache` | Baking and loading the KV cache of the machine-independent prompt. |
+| `generate` | Plain greedy generation, used for diagnostics and tests. |
 
-In-memory filesystem with FAT16-like structure:
+Weights are used **in place**. The file is laid out with 64-byte aligned tensors, so the kernel
+borrows `&[i8]`/`&[f32]` slices straight from the RAM disk. Only the activations and the KV
+cache are allocated: about 45 MiB for a 1024-token context with SmolLM2-135M.
 
-- Max files: 32
-- Max filename: 64 chars
-- Max file size: 4KB
-- Stored in memory initially (future: persist to disk)
+### Constrained decoding
 
-## LLM Integration
+At each step the decoder computes logits only for the tokens the grammar allows
+(`Logits::Subset`):
 
-The LLM shell works as follows:
+1. **Action name:** a prefix trie over the token sequences of the allowed names.
+2. **Field values:** tokens whose bytes fit the field's character set (file names:
+   `[A-Za-z0-9._-]`; text: printable ASCII without `"` or `\`), plus "closing quote" tokens.
+   Values have a token limit and stop when they start repeating.
+3. **Structure:** braces, quotes and keys are fed as fixed text.
 
-1. User types natural language command
-2. Input sent to LLM (or command parser)
-3. LLM returns JSON action
-4. Shell parses JSON and executes system calls
-5. Results displayed to user
+The result is always syntactically valid JSON naming a known action. `Action::from_json` then
+checks the semantics.
 
-### System Prompt
-```
-You are the shell of LLMOS. Interpret user commands and output JSON actions.
-```
+### Prompt caching
 
-## Device Drivers
+The prompt is `static_prompt()` (instructions and examples, identical on every machine),
+followed by a hardware note and the user turn. `llm-bake` runs the static part on the host and
+appends its KV cache to the model file. At boot the kernel copies it into the state, processes
+only the remaining ~50 tokens once, and rewinds to that point for every request.
 
-### VGA Driver
-- Text mode 80x25
-- Memory-mapped at 0xB8000
-- Color attributes in high byte
+### Verification
 
-### Keyboard Driver
-- PS/2 keyboard
-- Scancode to ASCII mapping
-- Ring buffer for input
+`llm/tests/reference.rs` compares against `transformers`, using vectors from
+`tools/make_test_vectors.py`:
 
-## Future Enhancements
+* tokenizer output must be identical,
+* f32 logits must match within 1e-2, and greedy continuations exactly,
+* Q8 must agree on the first generated token,
+* the baked cache must reproduce a fresh computation within 1e-3.
 
-- [ ] Full LLM inference (llama.cpp)
-- [ ] Disk filesystem (FAT16)
-- [ ] Process scheduler
-- [ ] Multi-threading
-- [ ] GPU support (VESA)
-- [ ] USB support
-- [ ] Network stack
+## Performance notes
+
+| Setup | Speed (SmolLM2-135M, Q8, one core) |
+|-------|-------------------------------------|
+| Host, native | ~19 tokens/s |
+| QEMU with KVM | close to native |
+| QEMU without KVM (software CPU) | ~0.7 tokens/s |
+
+The classifier (vocabulary × dim) is the largest single matrix. Constrained decoding avoids
+most of it by scoring only the allowed tokens.
+
+## Known limitations
+
+* Single core; no SMP or scheduler yet.
+* Files live in RAM and are lost at power-off (Phase 6 adds a disk).
+* Power-off uses QEMU/Bochs ports. Real ACPI S5 needs an AML interpreter.
+* The 135M model maps about 70% of unseen paraphrased requests to the right action
+  (`agent_eval`). Built-in commands remain available and exact.
