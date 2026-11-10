@@ -8,10 +8,13 @@
 //! cargo run -- run --headless     # no window: interact over the terminal only
 //! cargo run -- run --installed    # boot the disk llmos was installed onto
 //! cargo run -- image              # only build target/llmos-uefi.img
+//! cargo run -- iso                # build target/llmos.iso (UEFI-bootable live CD)
+//! cargo run -- vm-image           # build target/llmos.vmdk and target/llmos.vdi
 //! cargo run -- test               # automated end-to-end test (CI)
 //! cargo run -- arm                # build the AArch64 kernel, boot it on QEMU `virt`
 //! cargo run -- arm --board raspi3b --dtb bcm2710-rpi-3-b.dtb   # ... or a Raspberry Pi 3
 //! cargo run -- arm-test           # automated AArch64 boot test
+//! cargo run -- arm-image          # only build target/kernel8.img
 //! ```
 //!
 //! The boot image is attached as a virtio disk (`vd0`). Unless `--no-disk` is
@@ -64,12 +67,18 @@ enum Action {
     Run,
     /// Only build the disk image.
     Image,
+    /// Build a UEFI-bootable ISO 9660 image (live CD).
+    Iso,
+    /// Convert the disk image for VMware (`.vmdk`) and VirtualBox (`.vdi`).
+    VmImage,
     /// Boot headless, drive the shell over serial and check the output.
     Test,
     /// Build and boot the AArch64 kernel.
     Arm,
     /// Automated AArch64 boot test.
     ArmTest,
+    /// Only build the AArch64 `kernel8.img`.
+    ArmImage,
 }
 
 /// Parsed command-line options.
@@ -106,9 +115,12 @@ impl Options {
             match arg.as_str() {
                 "run" => opts.action = Action::Run,
                 "image" => opts.action = Action::Image,
+                "iso" => opts.action = Action::Iso,
+                "vm-image" => opts.action = Action::VmImage,
                 "test" => opts.action = Action::Test,
                 "arm" => opts.action = Action::Arm,
                 "arm-test" => opts.action = Action::ArmTest,
+                "arm-image" => opts.action = Action::ArmImage,
                 "--board" => opts.board = args.next().ok_or("--board needs a name")?,
                 "--dtb" => opts.dtb = Some(PathBuf::from(args.next().ok_or("--dtb needs a path")?)),
                 "--release" => opts.release = true,
@@ -165,9 +177,15 @@ fn real_main() -> Result<ExitCode> {
     let target_dir = root.join("target");
     let target_disk = target_dir.join("disk.img");
 
-    if matches!(opts.action, Action::Arm | Action::ArmTest) {
+    if matches!(
+        opts.action,
+        Action::Arm | Action::ArmTest | Action::ArmImage
+    ) {
         let image = build_arm_kernel(&root, opts.release)?;
         println!("AArch64 image: {}", image.display());
+        if opts.action == Action::ArmImage {
+            return Ok(ExitCode::SUCCESS);
+        }
         let cmd = arm_qemu_command(&image, &opts)?;
         if opts.action == Action::Arm {
             let status = { cmd }.status()?;
@@ -196,12 +214,27 @@ fn real_main() -> Result<ExitCode> {
     }
 
     let kernel = build_kernel(&root, opts.release)?;
+    if opts.action == Action::Iso {
+        let iso = target_dir.join("llmos.iso");
+        build_iso(&kernel, opts.model.as_deref(), &target_dir, &iso)?;
+        println!("ISO image: {}", iso.display());
+        return Ok(ExitCode::SUCCESS);
+    }
     let image = target_dir.join("llmos-uefi.img");
     build_image(&kernel, opts.model.as_deref(), &image)?;
     println!("disk image: {}", image.display());
 
     match opts.action {
         Action::Image => Ok(ExitCode::SUCCESS),
+        Action::VmImage => {
+            for format in ["vmdk", "vdi"] {
+                let out = target_dir.join(format!("llmos.{format}"));
+                convert_image(&image, &out, format)?;
+                println!("{format} image: {}", out.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Action::Iso => unreachable!("handled above"),
         Action::Run => {
             let mut disks = vec![image];
             if opts.target_disk {
@@ -213,7 +246,7 @@ fn real_main() -> Result<ExitCode> {
             run_interactive(&root, &Disks(disks), &opts)
         }
         Action::Test => run_tests(&root, &image, &opts),
-        Action::Arm | Action::ArmTest => unreachable!("handled above"),
+        Action::Arm | Action::ArmTest | Action::ArmImage => unreachable!("handled above"),
     }
 }
 
@@ -379,9 +412,9 @@ fn build_kernel(root: &Path, release: bool) -> Result<PathBuf> {
         .join("kernel"))
 }
 
-/// Packs the kernel (and optional model RAM disk) into a GPT disk image with
-/// a FAT EFI system partition containing the UEFI bootloader.
-fn build_image(kernel: &Path, model: Option<&Path>, image: &Path) -> Result<()> {
+/// Prepares an image builder holding the kernel and the optional model
+/// RAM disk.
+fn image_builder(kernel: &Path, model: Option<&Path>) -> Result<bootloader::DiskImageBuilder> {
     let mut builder = bootloader::DiskImageBuilder::new(kernel.to_path_buf());
     if let Some(model) = model {
         if !model.exists() {
@@ -390,7 +423,56 @@ fn build_image(kernel: &Path, model: Option<&Path>, image: &Path) -> Result<()> 
         println!("packing model {} into the boot RAM disk", model.display());
         builder.set_ramdisk(model.to_path_buf());
     }
-    builder.create_uefi_image(image)?;
+    Ok(builder)
+}
+
+/// Packs the kernel (and optional model RAM disk) into a GPT disk image with
+/// a FAT EFI system partition containing the UEFI bootloader.
+fn build_image(kernel: &Path, model: Option<&Path>, image: &Path) -> Result<()> {
+    image_builder(kernel, model)?.create_uefi_image(image)?;
+    Ok(())
+}
+
+/// Builds a UEFI-bootable ISO 9660 image.
+///
+/// The FAT file system with the bootloader, kernel and model becomes the
+/// El Torito EFI boot image of the CD. Needs `xorriso` on the host.
+fn build_iso(kernel: &Path, model: Option<&Path>, target_dir: &Path, iso: &Path) -> Result<()> {
+    let staging = target_dir.join("iso-root");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)?;
+    image_builder(kernel, model)?.create_uefi_fat_partition(&staging.join("efiboot.img"))?;
+    let status = Command::new("xorriso")
+        .args(["-as", "mkisofs", "-quiet", "-R", "-V", "LLMOS"])
+        .args(["-e", "efiboot.img", "-no-emul-boot"])
+        .arg("-o")
+        .arg(iso)
+        .arg(&staging)
+        .status()
+        .map_err(|e| {
+            format!("could not run xorriso (install it, e.g. `sudo apt install xorriso`): {e}")
+        })?;
+    fs::remove_dir_all(&staging)?;
+    if !status.success() {
+        return Err("xorriso failed".into());
+    }
+    Ok(())
+}
+
+/// Converts the raw disk image to another virtual-disk format with
+/// `qemu-img` (`vmdk` for VMware, `vdi` for VirtualBox).
+fn convert_image(raw: &Path, out: &Path, format: &str) -> Result<()> {
+    let status = Command::new("qemu-img")
+        .args(["convert", "-f", "raw", "-O", format])
+        .arg(raw)
+        .arg(out)
+        .status()
+        .map_err(|e| {
+            format!("could not run qemu-img (install it, e.g. `sudo apt install qemu-utils`): {e}")
+        })?;
+    if !status.success() {
+        return Err(format!("qemu-img failed to create {}", out.display()).into());
+    }
     Ok(())
 }
 

@@ -32,6 +32,16 @@ cargo run -- test --no-model           # x86-64: install + reboot test in QEMU
 cargo run -- arm-test --no-model       # AArch64: boot test in QEMU virt
 ```
 
+## Continuous integration and releases
+
+* `.github/workflows/ci.yml` runs the checks above on every push and pull request to `main`
+  and `dev`.
+* `.github/workflows/release.yml` builds the ISO, `.vmdk`, `.vdi` and ARM images with the
+  model and publishes a GitHub Release. To release: move the *Unreleased* notes in
+  `CHANGELOG.md` under a new version heading, bump the versions in the `Cargo.toml` files,
+  then push a tag (`git tag v0.3.0 && git push origin v0.3.0`), or start the workflow by hand
+  from the Actions tab.
+
 ## Coding standards
 
 * **Rust 2024 edition**, `rustfmt` defaults with a maximum width of 100 (`.editorconfig`).

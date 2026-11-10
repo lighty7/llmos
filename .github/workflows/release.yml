@@ -1,0 +1,98 @@
+# Builds the bootable images (with the language model) and publishes them
+# as a GitHub Release.
+#
+# Runs when a version tag such as v0.3.0 is pushed, or manually from the
+# Actions tab (give the tag to create or update).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update, e.g. v0.3.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  MODEL_REPO: HuggingFaceTB/SmolLM2-135M-Instruct
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: Build images and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-utils xorriso python3-numpy
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Download and convert the model
+        run: |
+          python3 tools/export_model.py --download "$MODEL_REPO" --name SmolLM2-135M-Instruct
+          cargo run --release -p llm --bin llm-bake
+
+      - name: Build images
+        run: |
+          cargo run --release -- iso
+          cargo run --release -- vm-image
+          cargo run --release -- arm-image
+          mkdir dist
+          cp target/llmos.iso "dist/llmos-$TAG-x86_64.iso"
+          cp target/llmos.vmdk "dist/llmos-$TAG-x86_64.vmdk"
+          cp target/llmos.vdi "dist/llmos-$TAG-x86_64.vdi"
+          cp target/kernel8.img "dist/llmos-$TAG-aarch64-kernel8.img"
+          cp models/llmos.model "dist/llmos-$TAG.model"
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist
+
+      - name: Write release notes
+        run: |
+          version="${TAG#v}"
+          {
+            # The section of CHANGELOG.md for this version, if there is one.
+            awk -v v="$version" '
+              /^## \[/ { printing = (index($0, "[" v "]") > 0) ; next }
+              /^\[.*\]: / { printing = 0 }
+              printing' CHANGELOG.md
+            cat <<'NOTES'
+
+          ## Files
+
+          | File | Use |
+          |------|-----|
+          | `llmos-*-x86_64.iso` | Live CD for VirtualBox, VMware or QEMU. Runs from RAM; `install` is not available from the CD. |
+          | `llmos-*-x86_64.vmdk` | VMware disk image. |
+          | `llmos-*-x86_64.vdi` | VirtualBox disk image. |
+          | `llmos-*-aarch64-kernel8.img` + `llmos-*.model` | ARM kernel and model (initrd) for QEMU `virt` or a Raspberry Pi 3/4. |
+
+          The virtual machine must use **EFI/UEFI firmware** with Secure Boot off and at least
+          1 GB of RAM. See the README for step-by-step set-up.
+
+          The images contain the SmolLM2-135M-Instruct model by Hugging Face TB, licensed under
+          Apache-2.0: https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct
+          NOTES
+          } | sed 's/^          //' > notes.md
+          cat notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "llmos $TAG" --notes-file notes.md --target "$GITHUB_SHA"
+          else
+            gh release edit "$TAG" --notes-file notes.md
+          fi
+          gh release upload "$TAG" dist/* --clobber

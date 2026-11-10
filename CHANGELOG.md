@@ -6,7 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
 ### Added
+
+- Release images: `cargo run -- iso` builds a UEFI-bootable live ISO, `cargo run -- vm-image`
+  builds `.vmdk` (VMware) and `.vdi` (VirtualBox) disks, `cargo run -- arm-image` builds
+  `kernel8.img` without booting it.
+- GitHub Actions: `ci.yml` checks formatting, runs the `llm` tests and both QEMU boot tests on
+  every push and pull request; `release.yml` builds the images with the model and publishes
+  them as a GitHub Release for `v*` tags or a manual run.
 
 - Phase 6, storage and installation:
   - virtio-blk driver (legacy PCI interface, DMA, polled) and a `BlockDevice` abstraction,
@@ -55,5 +64,6 @@ The project was rewritten in Rust. The C prototype lives on the `c-initial-idea`
 
 - The C kernel, the hand-written bootloader and the Makefile.
 
-[Unreleased]: https://github.com/lighty7/llmos/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/lighty7/llmos/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/lighty7/llmos/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lighty7/llmos/releases/tag/v0.2.0

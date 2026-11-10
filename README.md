@@ -42,7 +42,36 @@ hello there
 | AArch64 | Self-relocating Linux-style image, EL2→EL1, MMU, device tree, PL011, model as initrd ([docs/aarch64.md](docs/aarch64.md)) |
 | Testing | Host unit tests, comparison against Hugging Face `transformers`, automated QEMU tests (x86-64 and AArch64) |
 
-## Quick start
+## Download and run in a virtual machine
+
+Ready-made images are published on the
+[Releases page](https://github.com/lighty7/llmos/releases). They already contain the language
+model, so nothing has to be built.
+
+| File | For |
+|------|-----|
+| `llmos-<version>-x86_64.iso` | Live CD: the quickest way to try llmos. Runs from RAM. |
+| `llmos-<version>-x86_64.vdi` | VirtualBox hard disk |
+| `llmos-<version>-x86_64.vmdk` | VMware hard disk |
+
+**VirtualBox:** create a VM of type *Other / Other (64-bit)* with at least 1024 MB of RAM. In
+*Settings → System*, tick **Enable EFI**. Then attach the ISO to the optical drive, or attach
+the `.vdi` as the hard disk.
+
+**VMware:** create a VM for *Other 64-bit* with at least 1 GB of RAM and select **UEFI**
+firmware (*VM Settings → Options → Advanced → Firmware type*), with Secure Boot off. Then
+attach the ISO as the CD/DVD drive, or use the `.vmdk` as an existing SATA disk.
+
+Notes:
+
+* Images were tested in QEMU only. VirtualBox and VMware have not been tried yet, so please
+  report what you see.
+* The ISO is a live system: files are lost at power-off and `install` is unavailable.
+* Inside VirtualBox and VMware, `disks` and `install` do not work yet, and `poweroff` only
+  halts the CPU. Both need drivers that are planned next (SATA, ACPI power-off). Close the VM
+  window to stop it.
+
+## Quick start (build from source)
 
 ### 1. Install the prerequisites
 
@@ -86,6 +115,8 @@ tens of seconds. See [models/README.md](models/README.md) for details.
 | `cargo run -- run --installed` | Boot from the disk llmos was installed onto |
 | `cargo run -- run --headless` | Boot with no window (serial console only) |
 | `cargo run -- image` | Only build `target/llmos-uefi.img` |
+| `cargo run -- iso` | Build `target/llmos.iso`, a UEFI-bootable live CD (needs `xorriso`) |
+| `cargo run -- vm-image` | Build `target/llmos.vmdk` and `target/llmos.vdi` (needs `qemu-img`) |
 | `cargo run -- test` | Automated two-stage test: install onto a fresh disk, then boot from it and check persistence |
 | `cargo run -- arm` / `arm-test` | Build the AArch64 kernel and boot it on QEMU `virt` (`--board raspi3b --dtb FILE` for the Pi 3 model) / test it |
 | `cargo test --release -p llm` | Inference-engine tests (the reference tests need the model files) |

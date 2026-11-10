@@ -1,0 +1,61 @@
+# Continuous integration: formatting, host tests and QEMU boot tests.
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-system-arm ovmf
+
+      - name: Install the pinned Rust toolchain
+        # rust-toolchain.toml selects the nightly and its components.
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache Cargo builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            kernel-aarch64/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all --check
+          (cd kernel && cargo fmt --check)
+          (cd kernel-aarch64 && cargo fmt --check)
+
+      - name: Inference engine unit tests
+        run: cargo test -p llm
+
+      - name: x86-64 install and reboot test (QEMU)
+        run: cargo run -- test --no-model
+
+      - name: AArch64 boot test (QEMU)
+        run: cargo run -- arm-test --no-model
